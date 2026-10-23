@@ -17,11 +17,11 @@ Working memory for the build. Plan: `docs/superpowers/plans/2026-10-23-discord-e
 - [x] Task 7: Event service (upsert/dedupe/stale) + `/board preview` — incl. embed limit guards (≤25 fields / ≤1024 / ≤6000)
 - [x] 4-agent council + fixes (embed injection defense, guard collapse indicator, fetcher hardening, fingerprint change detection, per-product isolation; 163 tests green, 0 warnings)
 
-## Milestone 3 — Board system ⬜
+## Milestone 3 — Board system ✅ (complete 2026-10-23)
 
-- [ ] Task 8: Board service (windowing, hashing, create/edit)
-- [ ] Task 9: `/board refresh`, `/board recreate` + daily scheduler loop
-- [ ] 4-agent council + fixes
+- [x] Task 8: Board service (windowing, hashing, create/edit) — incl. deleted-message recovery on skip path, channel-move handling, fuller render hash
+- [x] Task 9: `/board refresh`, `/board recreate` + daily scheduler loop — incl. off-loop fetch, error-isolated steps, per-board concurrency lock
+- [x] 4-agent council + fixes (reliable trigger + bounded retry, Forbidden handling, recreate hardening; 227 tests green, 0 warnings)
 
 ## Milestone 4 — Month rollover ⬜
 
