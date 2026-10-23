@@ -150,3 +150,24 @@ class AdminCog(commands.Cog):
                 f"Removed source {source_id}", ephemeral=True)
         else:
             await interaction.response.send_message("Source not found.", ephemeral=True)
+
+    @board_group.command(name="preview")
+    @app_commands.choices(board_type=[
+        app_commands.Choice(name="this_week", value="this_week"),
+        app_commands.Choice(name="this_month", value="this_month"),
+    ])
+    async def board_preview(self, interaction: discord.Interaction,
+                            board_type: str) -> None:
+        from zoneinfo import ZoneInfo
+        from src.db.repositories import get_active_events, get_or_create_config
+        from src.discord_ui.embeds import build_board_embed
+        from src.services.board_service import filter_events_for_board
+
+        session = _session()
+        cfg = get_or_create_config(session, interaction.guild_id)
+        tz = ZoneInfo(cfg.timezone)
+        events = filter_events_for_board(
+            get_active_events(session, interaction.guild_id), board_type, cfg, tz)
+        embed = build_board_embed(events, board_type.replace("_", " ").title(),
+                                  tz, cfg.include_tba_section)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
