@@ -137,8 +137,10 @@ async def test_setup_hook_ddl_twice_adds_weekly_schema_idempotently(env, monkeyp
     try:
         insp = inspect(engine)
         assert "weekly_image_url" in {c["name"] for c in insp.get_columns("guild_config")}
+        assert "weekly_seeded" in {c["name"] for c in insp.get_columns("guild_config")}
         assert "weekly_recurring" in insp.get_table_names()
         with engine.connect() as conn:
+            assert conn.execute(text("SELECT weekly_seeded FROM guild_config")).scalar_one() == 0
             assert conn.execute(text("SELECT weekly_image_url FROM guild_config")).scalar_one() is None
     finally:
         engine.dispose()

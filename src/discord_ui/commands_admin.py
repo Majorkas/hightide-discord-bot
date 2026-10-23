@@ -166,7 +166,7 @@ class AdminCog(commands.Cog):
                 f"{_MAX_WEEKLY_TEXT_LEN} characters.", ephemeral=True)
             return
         with _session() as session:
-            # Seed first so adding to an untouched guild doesn't suppress the default roster.
+            # Seeds only on a never-seeded guild, so adding doesn't suppress the default roster.
             seed_weekly_recurring(session, interaction.guild_id)
             top = session.execute(select(func.max(WeeklyRecurring.sort_order)).where(
                 WeeklyRecurring.guild_id == interaction.guild_id)).scalar()
@@ -194,8 +194,18 @@ class AdminCog(commands.Cog):
         else:
             await interaction.response.send_message("Weekly event not found.", ephemeral=True)
 
-    @config_group.command(name="weekly_image")
+    @config_group.command(
+        name="weekly_image",
+        description="Set the weekly section image URL (or 'none' to clear it)")
     async def weekly_image(self, interaction: discord.Interaction, url: str) -> None:
+        if url.strip().lower() == "none":
+            with _session() as session:
+                cfg = get_or_create_config(session, interaction.guild_id)
+                cfg.weekly_image_url = None
+                session.commit()
+            await interaction.response.send_message(
+                f"Weekly image cleared. {_WEEKLY_REFRESH_NOTE}", ephemeral=True)
+            return
         if not _valid_source_url(url):
             await interaction.response.send_message(
                 f"Invalid URL. Use an http(s) URL up to {_MAX_URL_LEN} characters.",
@@ -266,8 +276,11 @@ class AdminCog(commands.Cog):
                     get_active_events(session, interaction.guild_id), board_type, cfg, tz)
                 preview_title = board_type.replace("_", " ").title()
                 if board_type == "this_week":
+                    seed_weekly_recurring(session, interaction.guild_id)
                     chunks = _chunk_embeds(build_week_board_payload(
-                        events, preview_title, tz, cfg.include_tba_section))
+                        events, preview_title, tz, cfg.include_tba_section,
+                        weekly_rows=get_weekly_rows(session, interaction.guild_id),
+                        weekly_image_url=cfg.weekly_image_url))
                     send_kwargs, followups = {"embeds": chunks[0]}, chunks[1:]
                 else:
                     send_kwargs = {"embed": build_board_embed(

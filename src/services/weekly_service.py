@@ -1,7 +1,8 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from src.db.models import WeeklyRecurring
+from src.db.models import GuildConfig, WeeklyRecurring
+from src.db.repositories import get_or_create_config
 
 # (title, days_text, time_text, ends_on)
 _DEFAULT_ROWS: list[tuple[str, str, str, str | None]] = [
@@ -15,16 +16,26 @@ _DEFAULT_ROWS: list[tuple[str, str, str, str | None]] = [
 
 
 def seed_weekly_recurring(session: Session, guild_id: int) -> int:
-    """Insert the default roster only when the guild has no rows; returns rows inserted."""
+    """Insert the default roster once per guild (guarded by weekly_seeded); returns rows inserted."""
+    get_or_create_config(session, guild_id)
+    # Atomic claim: only one concurrent caller flips the flag and gets to insert.
+    claimed = session.execute(update(GuildConfig).where(
+        GuildConfig.guild_id == guild_id, GuildConfig.weekly_seeded.is_(False),
+    ).values(weekly_seeded=True).execution_options(synchronize_session=False)).rowcount
+    if not claimed:
+        return 0
     existing = session.execute(select(func.count()).select_from(WeeklyRecurring).where(
         WeeklyRecurring.guild_id == guild_id)).scalar_one()
-    if existing:
+    if existing:  # pre-marker guild that already has a roster: just mark it seeded
+        session.commit()
+        session.refresh(session.get(GuildConfig, guild_id))
         return 0
     for order, (title, days, time_text, ends_on) in enumerate(_DEFAULT_ROWS):
         session.add(WeeklyRecurring(guild_id=guild_id, title=title, days_text=days,
                                     time_text=time_text, sort_order=order, enabled=True,
                                     ends_on=ends_on))
     session.commit()
+    session.refresh(session.get(GuildConfig, guild_id))
     return len(_DEFAULT_ROWS)
 
 

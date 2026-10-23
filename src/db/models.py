@@ -47,6 +47,7 @@ class GuildConfig(Base):
     include_tba_section: Mapped[bool] = mapped_column(Boolean, default=True)
     delete_previous_month_message: Mapped[bool] = mapped_column(Boolean, default=True)
     weekly_image_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    weekly_seeded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class WeeklyRecurring(Base):

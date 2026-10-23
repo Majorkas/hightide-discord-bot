@@ -261,6 +261,9 @@ def build_week_board_items(events: list[Event], title: str, tz,
 
 
 def build_week_board_payload(events: list[Event], title: str, tz,
-                             include_tba: bool) -> list[discord.Embed]:
-    """Header embed first, then one embed per card/overflow/TBA message (at most 10)."""
-    return [embed for _, embed in build_week_board_items(events, title, tz, include_tba)]
+                             include_tba: bool, weekly_rows=None,
+                             weekly_image_url: str | None = None) -> list[discord.Embed]:
+    """Header embed first, then one embed per card/overflow/weekly/TBA message."""
+    return [embed for _, embed in build_week_board_items(
+        events, title, tz, include_tba, weekly_rows=weekly_rows,
+        weekly_image_url=weekly_image_url)]

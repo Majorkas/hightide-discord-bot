@@ -6,9 +6,10 @@ from zoneinfo import ZoneInfo
 import discord
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 from src.db.models import Base, Event, GuildConfig, WeeklyRecurring
-from src.db.repositories import get_board_post
+from src.db.repositories import get_board_post, get_or_create_config
 from src.db.session import get_engine, get_session_factory
 from src.discord_ui import commands_admin
 from src.discord_ui.commands_admin import AdminCog
@@ -81,6 +82,29 @@ def test_seed_is_per_guild(session):
 def test_seed_skipped_when_guild_has_any_row(session):
     _add_rows(session, _row())
     assert seed_weekly_recurring(session, GUILD) == 0
+    assert len(session.execute(select(WeeklyRecurring)).scalars().all()) == 1
+    assert session.get(GuildConfig, GUILD).weekly_seeded is True
+
+
+def test_seed_sets_marker_and_never_reseeds_emptied_roster(session):
+    assert seed_weekly_recurring(session, GUILD) == 6
+    assert session.get(GuildConfig, GUILD).weekly_seeded is True
+    for row in session.execute(select(WeeklyRecurring)).scalars().all():
+        session.delete(row)
+    session.commit()
+    assert seed_weekly_recurring(session, GUILD) == 0
+    assert session.execute(select(WeeklyRecurring)).scalars().all() == []
+
+
+def test_seed_second_concurrent_session_skips(session):
+    other = sessionmaker(bind=session.get_bind())()
+    try:
+        get_or_create_config(session, GUILD)
+        assert seed_weekly_recurring(session, GUILD) == 6
+        assert seed_weekly_recurring(other, GUILD) == 0
+    finally:
+        other.close()
+    assert len(session.execute(select(WeeklyRecurring)).scalars().all()) == 6
 
 
 # --- rendering ---------------------------------------------------------------------
@@ -346,6 +370,28 @@ async def test_weekly_add_first_row_in_empty_guild_seeds_defaults_first(db, cog,
     assert len(rows) == 7 and rows[-1].title == "Chess" and rows[-1].sort_order == 6
 
 
+async def test_weekly_add_after_roster_emptied_does_not_reseed(db, cog, interaction):
+    with db() as s:
+        seed_weekly_recurring(s, GUILD)
+        for r in s.execute(select(WeeklyRecurring)).scalars().all():
+            s.delete(r)
+        s.commit()
+    await cog.weekly_add.callback(cog, interaction, "Chess", "Wed", "7:00 PM")
+    rows = _rows(db)
+    assert [r.title for r in rows] == ["Chess"] and rows[0].sort_order == 0
+
+
+async def test_weekly_list_after_roster_emptied_does_not_reseed(db, cog, interaction):
+    with db() as s:
+        seed_weekly_recurring(s, GUILD)
+        for r in s.execute(select(WeeklyRecurring)).scalars().all():
+            s.delete(r)
+        s.commit()
+    await cog.weekly_list.callback(cog, interaction)
+    _reply(interaction)
+    assert _rows(db) == []
+
+
 @pytest.mark.parametrize("title,days,time", [
     ("", "Mon", "6 PM"), ("  ", "Mon", "6 PM"), ("T", "", "6 PM"), ("T", "Mon", " "),
     ("x" * 201, "Mon", "6 PM"), ("T", "d" * 41, "6 PM"), ("T", "Mon", "t" * 41),
@@ -415,6 +461,28 @@ async def test_weekly_image_sets_url(db, cog, interaction):
     assert "next refresh" in msg
     with db() as s:
         assert s.get(GuildConfig, GUILD).weekly_image_url == IMG
+
+
+@pytest.mark.parametrize("value", ["none", "NONE", " None "])
+async def test_weekly_image_none_clears_url(db, cog, interaction, value):
+    with db() as s:
+        s.add(GuildConfig(guild_id=GUILD, weekly_image_url=IMG))
+        s.commit()
+    await cog.weekly_image.callback(cog, interaction, value)
+    assert "cleared" in _reply(interaction)
+    with db() as s:
+        assert s.get(GuildConfig, GUILD).weekly_image_url is None
+
+
+async def test_board_preview_this_week_includes_weekly_section(db, cog, interaction):
+    with db() as s:
+        s.add(GuildConfig(guild_id=GUILD, timezone="Australia/Perth", weekly_image_url=IMG))
+        s.commit()
+    await cog.board_preview.callback(cog, interaction, "this_week")
+    _, kwargs = interaction.response.send_message.call_args
+    weekly = [e for e in kwargs["embeds"] if e.title == "Every week at Hightide"]
+    assert len(weekly) == 1 and "DND Fremantle" in weekly[0].description
+    assert weekly[0].image.url == IMG
 
 
 @pytest.mark.parametrize("url", ["ftp://x/y.png", "javascript:alert(1)", "not a url", "",
