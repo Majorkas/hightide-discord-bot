@@ -15,7 +15,8 @@ def get_or_create_config(session: Session, guild_id: int) -> GuildConfig:
     return cfg
 
 
-def upsert_event(session: Session, guild_id: int, data: dict) -> tuple[Event, bool]:
+def upsert_event(session: Session, guild_id: int,
+                 data: dict) -> tuple[Event, bool, bool]:
     stmt = select(Event).where(
         Event.guild_id == guild_id, Event.external_id == data["external_id"]
     )
@@ -25,6 +26,7 @@ def upsert_event(session: Session, guild_id: int, data: dict) -> tuple[Event, bo
     if created:
         ev = Event(guild_id=guild_id, external_id=data["external_id"])
         session.add(ev)
+    old_fingerprint = ev.fingerprint
     for key in (
         "source_url", "title", "url", "starts_at", "time_known",
         "price_text", "summary", "image_url", "fingerprint",
@@ -34,8 +36,9 @@ def upsert_event(session: Session, guild_id: int, data: dict) -> tuple[Event, bo
     ev.last_seen_at = now
     ev.missed_refreshes = 0
     ev.is_active = True
+    changed = created or old_fingerprint != ev.fingerprint
     session.commit()
-    return ev, created
+    return ev, created, changed
 
 
 def get_active_events(session: Session, guild_id: int) -> list[Event]:

@@ -1,13 +1,22 @@
+import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 
 from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
 from src.scraping.normalize import (
-    clean_title, extract_price, extract_time, fingerprint, parse_event_datetime,
-    strip_html,
+    _DOT_PREFIX, _NATURAL_DATE, clean_title, extract_price, extract_time,
+    fingerprint, parse_event_datetime,
 )
+
+MAX_TITLE_CHARS = 200
+MAX_PRICE_CHARS = 80
+MAX_URL_CHARS = 500
+
+# A bare number like "11" or "10 - 6" is not a start time; need am/pm or HH:MM.
+_TIME_MARKER = re.compile(r"(?<![a-z])[ap]\.?m\.?\b|\d:\d", re.IGNORECASE)
+_SEPARATORS = re.compile(r"^[\s\-–—:,]+|[\s\-–—:,]+$")
 
 
 @dataclass
@@ -23,65 +32,47 @@ class NormalizedEvent:
     fingerprint: str
 
 
-def _extract_summary(content_html: str, title: str) -> str | None:
-    """Extract the first non-metadata, non-title-duplicate paragraph as summary."""
-    if not content_html:
-        return None
-    
-    soup = BeautifulSoup(content_html, "html.parser")
-    paragraphs = soup.find_all("p")
-    
-    for p in paragraphs:
-        text = p.get_text(" ", strip=True)
-        
-        # Skip paragraphs starting with arrow metadata
-        if text.startswith("→"):
-            continue
-        
-        # Skip paragraphs that are near-duplicates of the title
-        # (title often repeats in first paragraph after normalization)
-        if _is_title_duplicate(text, title):
-            continue
-        
-        # Found the first real summary paragraph
-        if len(text) > 280:
-            return text[:277] + "..."
-        return text if text else None
-    
-    return None
+def _norm(s: str) -> str:
+    s = re.sub(r"[–—]", "-", s.lower())
+    s = re.sub(r"\s+", " ", s)
+    return _SEPARATORS.sub("", s)
+
+
+def _date_free_forms(s: str) -> set[str]:
+    """Normalised forms of s with/without its dot-prefix and natural-language date."""
+    no_dot = _DOT_PREFIX.sub("", s)
+    forms = {
+        _norm(s),
+        _norm(no_dot),
+        _norm(_NATURAL_DATE.sub("", s)),
+        _norm(_NATURAL_DATE.sub("", no_dot)),
+    }
+    forms.discard("")
+    return forms
 
 
 def _is_title_duplicate(para_text: str, title: str) -> bool:
-    """Check if a paragraph text is a near-duplicate of the title."""
-    # Normalize both strings: lowercase, collapse whitespace, remove common punctuation
-    import re
-    
-    def normalize(s: str) -> str:
-        s = s.lower().strip()
-        # Replace em-dashes and en-dashes with regular dash
-        s = re.sub(r'[–—]', '-', s)
-        # Collapse whitespace
-        s = re.sub(r'\s+', ' ', s)
-        return s
-    
-    para_norm = normalize(para_text)
-    title_norm = normalize(title)
-    
-    # Exact match after normalization
-    if para_norm == title_norm:
-        return True
-    
-    # Check if the cleaned paragraph (without date prefix) matches title
-    # e.g., "05.11.26 - Weekly Duels - Yu-Gi-Oh!" title vs "Weekly Duels - Yu-Gi-Oh!" paragraph
-    # Remove leading date patterns (e.g., "05.11.26 - ")
-    para_cleaned = re.sub(r'^\d{1,2}\.\d{1,2}\.\d{2,4}\s*-?\s*', '', para_norm)
-    if para_cleaned and para_cleaned == title_norm:
-        return True
-    if para_cleaned and para_cleaned == re.sub(r'^\d{1,2}\.\d{1,2}\.\d{2,4}\s*-?\s*', '', title_norm):
-        return True
-    
-    return False
+    return bool(_date_free_forms(para_text) & _date_free_forms(title))
 
+
+def _extract_summary(content_html: str, title: str) -> str | None:
+    """First non-metadata paragraph that isn't an echo of the title."""
+    if not content_html:
+        return None
+
+    soup = BeautifulSoup(content_html, "html.parser")
+    for p in soup.find_all("p"):
+        text = p.get_text(" ", strip=True)
+        if not text:
+            continue
+        if text.startswith("→"):
+            continue
+        if _is_title_duplicate(text, title):
+            continue
+        if len(text) > 280:
+            return text[:277] + "..."
+        return text
+    return None
 
 
 def _image_url(product: dict) -> str | None:
@@ -92,37 +83,42 @@ def _image_url(product: dict) -> str | None:
     return None
 
 
+def _parse_clock(s: str) -> time | None:
+    if not _TIME_MARKER.search(s):
+        return None
+    try:
+        return dateutil_parser.parse(s).time()
+    except (ValueError, OverflowError):
+        return None
+
+
 def parse_product(product: dict, tz) -> NormalizedEvent:
-    title = clean_title(product["title"]["rendered"])
+    full_title = clean_title(product["title"]["rendered"])
     content = product.get("content", {}).get("rendered", "")
-    starts_at, _ = parse_event_datetime(title, tz)
+    starts_at, _ = parse_event_datetime(full_title, tz)
+    title = full_title[:MAX_TITLE_CHARS]
 
     time_known = False
     time_str = extract_time(content)
     if starts_at is not None and time_str:
-        try:
-            t = dateutil_parser.parse(time_str).time()
+        t = _parse_clock(time_str)
+        if t is None and time_str.lower().startswith("from "):
+            t = _parse_clock(time_str[5:])
+        if t is not None:
             starts_at = starts_at.replace(hour=t.hour, minute=t.minute, second=0)
             time_known = True
-        except (ValueError, OverflowError):
-            # If parse fails and time_str starts with "From ", retry on the remainder
-            if time_str.lower().startswith("from "):
-                try:
-                    t = dateutil_parser.parse(time_str[5:]).time()
-                    starts_at = starts_at.replace(hour=t.hour, minute=t.minute, second=0)
-                    time_known = True
-                except (ValueError, OverflowError):
-                    pass
 
     price_text = extract_price(content)
-    summary_text = _extract_summary(content, title)
+    if price_text is not None:
+        price_text = price_text[:MAX_PRICE_CHARS]
+    summary_text = _extract_summary(content, full_title)
     starts_iso = starts_at.isoformat() if starts_at else None
     fp = fingerprint(title, starts_iso, price_text, summary_text)
 
     return NormalizedEvent(
         external_id=f"wp:{product['id']}",
         title=title,
-        url=product["link"],
+        url=product["link"][:MAX_URL_CHARS],
         starts_at=starts_at,
         time_known=time_known,
         price_text=price_text,
