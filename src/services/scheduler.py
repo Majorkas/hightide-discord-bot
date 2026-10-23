@@ -13,6 +13,16 @@ from src.services.event_service import refresh_events
 
 log = logging.getLogger("hightide.scheduler")
 
+# Created lazily; tests can monkeypatch or reset to None.
+_session_factory = None
+
+
+def _get_session_factory():
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = get_session_factory(config.DATABASE_URL)
+    return _session_factory
+
 
 def should_run_now(hhmm: str, hour: int, minute: int) -> bool:
     try:
@@ -23,7 +33,7 @@ def should_run_now(hhmm: str, hour: int, minute: int) -> bool:
 
 
 async def run_daily_refresh(bot, guild_id: int) -> dict:
-    with get_session_factory(config.DATABASE_URL)() as session:
+    with _get_session_factory()() as session:
         cfg = get_or_create_config(session, guild_id)
         tz = ZoneInfo(cfg.timezone)
         stats = await asyncio.to_thread(
@@ -50,7 +60,7 @@ class RefreshScheduler:
         if config.GUILD_ID is None:
             log.debug("GUILD_ID not configured, skipping scheduler tick")
             return
-        with get_session_factory(config.DATABASE_URL)() as session:
+        with _get_session_factory()() as session:
             try:
                 cfg = get_or_create_config(session, config.GUILD_ID)
                 tz = ZoneInfo(cfg.timezone)

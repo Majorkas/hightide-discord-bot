@@ -206,3 +206,164 @@ async def test_board_preview(db, cog, interaction):
     args, kwargs = interaction.response.send_message.call_args
     assert "embed" in kwargs
     assert isinstance(kwargs["embed"], discord.Embed)
+
+
+async def test_board_refresh_success(db, cog, interaction, monkeypatch):
+    """Test /board refresh success path sends a followup with refresh stats."""
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    
+    mock_refresh = AsyncMock(return_value={"events": {"added": 1}, "this_week": "created", "this_month": "skipped"})
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+    
+    await cog.board_refresh.callback(cog, interaction)
+    
+    # Verify defer was called first
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    
+    # Verify followup was sent with success message
+    interaction.followup.send.assert_awaited_once()
+    args, kwargs = interaction.followup.send.call_args
+    assert "Refresh complete" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_board_refresh_error(db, cog, interaction, monkeypatch):
+    """Test /board refresh error path sends failure followup without propagating."""
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    
+    mock_refresh = AsyncMock(side_effect=RuntimeError("Test error"))
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+    
+    # Should not raise
+    await cog.board_refresh.callback(cog, interaction)
+    
+    # Verify defer was called
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    
+    # Verify error followup was sent
+    interaction.followup.send.assert_awaited_once()
+    args, kwargs = interaction.followup.send.call_args
+    assert "Refresh failed" in args[0]
+    assert "RuntimeError" in args[0]
+    assert "Test error" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_board_recreate_with_existing_post(db, cog, interaction, monkeypatch):
+    """Test /board recreate deletes old message and DB row, then upserts."""
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    
+    # Seed DB with a board post
+    from src.db.models import BoardPost
+    with db() as s:
+        post = BoardPost(
+            guild_id=GUILD, board_type="this_week",
+            period_key="2026-W43", channel_id=111, message_id=555, render_hash="old"
+        )
+        s.add(post)
+        s.commit()
+    
+    # Mock Discord message fetch and delete
+    mock_channel = MagicMock()
+    mock_message = AsyncMock()
+    mock_message.delete = AsyncMock()
+    mock_channel.fetch_message = AsyncMock(return_value=mock_message)
+    cog.bot.get_channel = MagicMock(return_value=mock_channel)
+    
+    # Mock upsert_board
+    mock_upsert = AsyncMock(return_value="created")
+    monkeypatch.setattr("src.services.board_service.upsert_board", mock_upsert)
+    
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+    
+    # Verify defer was called
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    
+    # Verify old message was deleted
+    mock_channel.fetch_message.assert_awaited_once_with(555)
+    mock_message.delete.assert_awaited_once()
+    
+    # Verify DB row was deleted
+    with db() as s:
+        from src.db.repositories import get_board_post
+        post = get_board_post(s, GUILD, "this_week")
+        assert post is None
+    
+    # Verify upsert was called
+    mock_upsert.assert_awaited_once()
+    
+    # Verify followup was sent
+    interaction.followup.send.assert_awaited_once()
+    args, kwargs = interaction.followup.send.call_args
+    assert "this_week" in args[0]
+    assert "created" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_board_recreate_message_not_found(db, cog, interaction, monkeypatch):
+    """Test /board recreate handles discord.NotFound when deleting old message."""
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    
+    # Seed DB with a board post
+    from src.db.models import BoardPost
+    with db() as s:
+        post = BoardPost(
+            guild_id=GUILD, board_type="this_week",
+            period_key="2026-W43", channel_id=111, message_id=555, render_hash="old"
+        )
+        s.add(post)
+        s.commit()
+    
+    # Mock Discord message fetch to raise NotFound
+    mock_channel = MagicMock()
+    mock_response = MagicMock()
+    mock_response.status = 404
+    mock_response.reason = 'Not Found'
+    mock_channel.fetch_message = AsyncMock(side_effect=discord.NotFound(mock_response, "message not found"))
+    cog.bot.get_channel = MagicMock(return_value=mock_channel)
+    
+    # Mock upsert_board
+    mock_upsert = AsyncMock(return_value="created")
+    monkeypatch.setattr("src.services.board_service.upsert_board", mock_upsert)
+    
+    # Should not raise even though message is missing
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+    
+    # DB row should still be deleted
+    with db() as s:
+        from src.db.repositories import get_board_post
+        post = get_board_post(s, GUILD, "this_week")
+        assert post is None
+    
+    # Upsert should still be called
+    mock_upsert.assert_awaited_once()
+    
+    # Followup should be sent
+    interaction.followup.send.assert_awaited_once()
+
+
+async def test_board_recreate_no_existing_post(db, cog, interaction, monkeypatch):
+    """Test /board recreate skips deletion when no prior post exists."""
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    
+    # No prior post in DB
+    
+    # Mock upsert_board
+    mock_upsert = AsyncMock(return_value="created")
+    monkeypatch.setattr("src.services.board_service.upsert_board", mock_upsert)
+    
+    await cog.board_recreate.callback(cog, interaction, "this_month")
+    
+    # Upsert should be called
+    mock_upsert.assert_awaited_once()
+    
+    # Followup should be sent
+    interaction.followup.send.assert_awaited_once()
+    args, kwargs = interaction.followup.send.call_args
+    assert "this_month" in args[0]
+    assert kwargs.get("ephemeral") is True

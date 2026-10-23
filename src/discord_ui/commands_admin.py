@@ -176,8 +176,16 @@ class AdminCog(commands.Cog):
     async def board_refresh(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         from src.services.scheduler import run_daily_refresh
-        result = await run_daily_refresh(self.bot, interaction.guild_id)
-        await interaction.followup.send(f"Refresh complete: `{result}`", ephemeral=True)
+        try:
+            result = await run_daily_refresh(self.bot, interaction.guild_id)
+            await interaction.followup.send(f"Refresh complete: `{result}`", ephemeral=True)
+        except Exception as e:
+            import logging
+            logging.getLogger("hightide").exception("board refresh failed")
+            await interaction.followup.send(
+                f"Refresh failed: {type(e).__name__}: {str(e)}",
+                ephemeral=True
+            )
 
     @board_group.command(name="recreate")
     @app_commands.choices(board_type=[
@@ -186,14 +194,22 @@ class AdminCog(commands.Cog):
     ])
     async def board_recreate(self, interaction: discord.Interaction,
                              board_type: str) -> None:
+        await interaction.response.defer(ephemeral=True)
         from src.db.repositories import get_board_post
         from src.services.board_service import upsert_board
-        session = _session()
-        post = get_board_post(session, interaction.guild_id, board_type)
-        if post:
-            session.delete(post)
-            session.commit()
-        action = await upsert_board(self.bot, session, interaction.guild_id, board_type)
-        session.close()
-        await interaction.response.send_message(
+        with _session() as session:
+            post = get_board_post(session, interaction.guild_id, board_type)
+            if post:
+                # Best-effort delete old Discord message
+                try:
+                    channel = self.bot.get_channel(post.channel_id)
+                    if channel:
+                        msg = await channel.fetch_message(post.message_id)
+                        await msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass  # Message already gone or no permission
+                session.delete(post)
+                session.commit()
+            action = await upsert_board(self.bot, session, interaction.guild_id, board_type)
+        await interaction.followup.send(
             f"{board_type} board action: {action}", ephemeral=True)
