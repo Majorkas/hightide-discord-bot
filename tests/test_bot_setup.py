@@ -59,3 +59,17 @@ async def test_setup_hook_syncs_to_guild_when_set(env, monkeypatch):
     guild = kwargs["guild"]
     assert isinstance(guild, discord.Object) and guild.id == 4242
     assert copied == [{"guild": guild}]
+
+
+def test_main_without_token_exits_before_running(monkeypatch):
+    from src import bot as bot_module
+
+    monkeypatch.setattr(config, "DISCORD_TOKEN", "")
+    create = []
+    monkeypatch.setattr(bot_module, "create_bot", lambda: create.append(1))
+
+    with pytest.raises(SystemExit) as exc:
+        bot_module.main()
+
+    assert str(exc.value) == "DISCORD_TOKEN is not set — copy .env.example to .env and fill it in"
+    assert create == []

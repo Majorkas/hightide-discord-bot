@@ -238,6 +238,9 @@ tests/                       # pytest suite with fixtures
 - Ensure `DATABASE_URL` points to a writable location.
 - On Railway/Render, verify the persistent volume is mounted and the path is correct.
 
+**Board channel moved via `/config`:**
+- The previous board message stays in the old channel (delete it manually if unwanted); it is not reposted as a duplicate.
+
 ## License
 
 TBD — this is a private project for Hightide Tabletop LGS.

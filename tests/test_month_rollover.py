@@ -271,10 +271,10 @@ async def test_month_rollover_handles_missing_old_message(session):
     assert post2.message_id == 200
 
 
-async def test_month_rollover_handles_forbidden_on_fetch(session):
+async def test_month_rollover_forbidden_on_fetch_propagates(session):
     """
-    fetch_message raises Forbidden (e.g., no perms on old channel).
-    Should still recreate successfully and skip delete.
+    fetch_message raises Forbidden on the initial fetch (e.g., no perms in channel).
+    Must propagate (not recreate) so the scheduler reports error:Forbidden.
     """
     _seed(session)
     month_channel = _channel(222)
@@ -297,9 +297,11 @@ async def test_month_rollover_handles_forbidden_on_fetch(session):
 
     with patch("src.services.board_service.period_key", return_value="2026-10"):
         month_channel.send = AsyncMock(return_value=_message(200))
-        result2 = await upsert_board(bot, session, GUILD, "this_month")
+        with pytest.raises(discord.Forbidden):
+            await upsert_board(bot, session, GUILD, "this_month")
 
-    assert result2 == "recreated"
+    month_channel.send.assert_not_awaited()
+    assert get_board_post(session, GUILD, "this_month").message_id == 100
 
 
 async def test_this_week_period_change_does_not_trigger_rollover(session):

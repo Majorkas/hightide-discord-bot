@@ -109,3 +109,20 @@ def test_snowflake_guild_id_round_trip(session):
     assert cfg.guild_id == gid
     assert cfg.this_week_channel_id == gid + 1
     assert session.query(Event).filter_by(guild_id=gid).one().guild_id == gid
+
+
+def test_guild_config_timezone_default_follows_config(session, monkeypatch):
+    import importlib
+
+    import src.config as config
+
+    monkeypatch.setenv("DEFAULT_TIMEZONE", "Europe/London")
+    importlib.reload(config)
+    try:
+        session.add(GuildConfig(guild_id=42))
+        session.commit()
+        session.expire_all()
+        assert session.get(GuildConfig, 42).timezone == "Europe/London"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

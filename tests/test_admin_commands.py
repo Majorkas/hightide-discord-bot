@@ -472,3 +472,17 @@ async def test_board_recreate_upserts_after_row_deleted(db, cog, interaction, mo
     await cog.board_recreate.callback(cog, interaction, "this_week")
 
     assert seen == {"row_present": False}
+
+
+async def test_board_preview_failure_sends_ephemeral_error(db, cog, interaction, monkeypatch):
+    monkeypatch.setattr("src.services.board_service.filter_events_for_board",
+                        MagicMock(side_effect=RuntimeError("kaput")))
+
+    await cog.board_preview.callback(cog, interaction, "this_week")
+
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "failed" in args[0].lower()
+    assert "RuntimeError" in args[0]
+    assert "kaput" not in args[0]
+    assert kwargs.get("ephemeral") is True

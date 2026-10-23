@@ -104,3 +104,10 @@ def test_source_url_populated(session, fixture_products, tz):
                     source_url="https://hightidetabletop.com.au")
     rows = session.query(Event).all()
     assert rows and all(r.source_url == "https://hightidetabletop.com.au" for r in rows)
+
+
+def test_malformed_product_attribute_error_isolated(session, fixture_products, tz):
+    bad = {"id": 99999, "title": {"rendered": "Broken Event"}, "content": None}
+    stats = upsert_products(session, 1, [bad] + fixture_products[:3], tz)
+    assert stats["failed"] == 1
+    assert stats["created"] == 3

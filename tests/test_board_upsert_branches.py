@@ -8,7 +8,9 @@ import pytest
 
 from src.db.models import Event, GuildConfig
 from src.db.repositories import get_board_post
-from src.services.board_service import period_key, render_board_hash, upsert_board
+from src.services.board_service import (
+    _get_board_lock, delete_board, period_key, render_board_hash, upsert_board,
+)
 
 TZ = ZoneInfo("Australia/Perth")
 GUILD = 999
@@ -90,7 +92,7 @@ async def test_edit_raising_notfound_recreates(session):
     assert get_board_post(session, GUILD, "this_week").message_id == 777
 
 
-async def test_forbidden_on_fetch_recreates(session):
+async def test_forbidden_on_fetch_propagates_without_recreate(session):
     _seed(session)
     channel = _channel()
     channel.send = AsyncMock(side_effect=[_message(555), _message(666)])
@@ -99,12 +101,13 @@ async def test_forbidden_on_fetch_recreates(session):
 
     # Identical content (skip path) but fetch is forbidden.
     channel.fetch_message = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
-    assert await upsert_board(bot, session, GUILD, "this_week") == "created"
-    assert channel.send.await_count == 2
-    assert channel.fetch_message.await_count == 1
+    with pytest.raises(discord.Forbidden):
+        await upsert_board(bot, session, GUILD, "this_week")
+    assert channel.send.await_count == 1
+    assert get_board_post(session, GUILD, "this_week").message_id == 555
 
 
-async def test_forbidden_on_fetch_in_edit_path_recreates(session):
+async def test_forbidden_on_fetch_in_edit_path_propagates(session):
     _seed(session)
     channel = _channel()
     channel.send = AsyncMock(side_effect=[_message(555), _message(666)])
@@ -117,8 +120,104 @@ async def test_forbidden_on_fetch_in_edit_path_recreates(session):
     session.commit()
     channel.fetch_message = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
 
-    assert await upsert_board(bot, session, GUILD, "this_week") == "created"
-    assert channel.fetch_message.await_count == 1
+    with pytest.raises(discord.Forbidden):
+        await upsert_board(bot, session, GUILD, "this_week")
+    assert channel.send.await_count == 1
+
+
+async def test_forbidden_on_edit_propagates_without_recreate(session):
+    _seed(session)
+    channel = _channel()
+    first, fetched = _message(555), _message(555)
+    channel.send = AsyncMock(side_effect=[first, _message(777)])
+    channel.fetch_message = AsyncMock(return_value=fetched)
+    bot = _bot(channel)
+    await upsert_board(bot, session, GUILD, "this_week")
+
+    session.add(Event(guild_id=GUILD, external_id="wp:e2", title="e2", url="https://x",
+                      starts_at=datetime.now(TZ) + timedelta(hours=2),
+                      time_known=True, is_active=True))
+    session.commit()
+    fetched.edit = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
+
+    with pytest.raises(discord.Forbidden):
+        await upsert_board(bot, session, GUILD, "this_week")
+    assert channel.send.await_count == 1
+
+
+async def test_new_post_save_failure_deletes_sent_message(session, monkeypatch):
+    _seed(session)
+    channel = _channel()
+    sent = _message(555)
+    channel.send = AsyncMock(return_value=sent)
+    bot = _bot(channel)
+    monkeypatch.setattr("src.services.board_service.save_board_post",
+                        MagicMock(side_effect=RuntimeError("db down")))
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await upsert_board(bot, session, GUILD, "this_week")
+    sent.delete.assert_awaited_once()
+
+
+async def test_new_post_save_failure_cleanup_failure_still_reraises_original(session, monkeypatch):
+    _seed(session)
+    channel = _channel()
+    sent = _message(555)
+    sent.delete = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
+    channel.send = AsyncMock(return_value=sent)
+    bot = _bot(channel)
+    monkeypatch.setattr("src.services.board_service.save_board_post",
+                        MagicMock(side_effect=RuntimeError("db down")))
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await upsert_board(bot, session, GUILD, "this_week")
+    sent.delete.assert_awaited_once()
+
+
+async def test_delete_board_not_found(session):
+    _seed(session)
+    bot = _bot(_channel())
+    assert await delete_board(bot, session, GUILD, "this_week") == "not_found"
+
+
+async def test_delete_board_deletes_message_and_row_under_lock(session):
+    _seed(session)
+    channel = _channel()
+    channel.send = AsyncMock(return_value=_message(555))
+    bot = _bot(channel)
+    bot.user.id = 42
+    await upsert_board(bot, session, GUILD, "this_week")
+
+    old = _message(555)
+    old.author.id = 42
+    lock_states = []
+
+    async def fetch_message(message_id):
+        lock_states.append(_get_board_lock(GUILD, "this_week").locked())
+        return old
+
+    channel.fetch_message = AsyncMock(side_effect=fetch_message)
+
+    assert await delete_board(bot, session, GUILD, "this_week") == "deleted"
+    assert lock_states == [True]
+    old.delete.assert_awaited_once()
+    assert get_board_post(session, GUILD, "this_week") is None
+    assert not _get_board_lock(GUILD, "this_week").locked()
+
+
+async def test_delete_board_serialised_with_upsert(session):
+    _seed(session)
+    channel = _channel()
+    channel.send = AsyncMock(return_value=_message(555))
+    bot = _bot(channel)
+    bot.user.id = 42
+    await upsert_board(bot, session, GUILD, "this_week")
+
+    async with _get_board_lock(GUILD, "this_week"):
+        task = asyncio.ensure_future(delete_board(bot, session, GUILD, "this_week"))
+        await asyncio.sleep(0.02)
+        assert not task.done()
+    assert await task == "deleted"
 
 
 async def test_get_channel_none_falls_back_to_fetch_channel(session):

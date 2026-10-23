@@ -1,10 +1,11 @@
+import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.db.models import Base, GuildConfig
+from src.db.models import Base, Event, GuildConfig
 from src.db.session import get_engine, get_session_factory
 from src.services import scheduler
 from src.services.scheduler import RefreshScheduler, _in_run_window, should_run_now
@@ -557,3 +558,91 @@ async def test_tick_failure_on_day_n_does_not_block_next_day(temp_db, monkeypatc
     assert _fetch_flags(mock_refresh)[-1] is True  # new day refetches upstream
     assert inst._last_run_key[999] == "2026-10-24"
     assert inst._events_done_key[999] == "2026-10-24"
+
+
+# --- final review: rollback + per-guild refresh lock ---
+
+async def test_run_daily_refresh_rolls_back_after_fetch_commit_failure(temp_db, monkeypatch):
+    from unittest.mock import PropertyMock
+
+    from sqlalchemy.exc import IntegrityError
+
+    _seed(temp_db)
+
+    def failing_refresh(session, guild_id, base_url, tz):
+        # Unique (guild_id, external_id) violation fails inside flush, poisoning the session.
+        for _ in range(2):
+            session.add(Event(guild_id=guild_id, external_id="wp:dup", title="t", url="u"))
+        session.commit()
+
+    monkeypatch.setattr("src.services.scheduler.refresh_events", failing_refresh)
+    sent = AsyncMock()
+    type(sent).id = PropertyMock(return_value=555)
+    channel = AsyncMock()
+    type(channel).id = PropertyMock(return_value=111)
+    channel.send = AsyncMock(return_value=sent)
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=channel)
+
+    result = await scheduler.run_daily_refresh(bot, 999)
+
+    assert result["events"] == f"error:{IntegrityError.__name__}"
+    assert result["this_week"] == "created"
+    assert result["this_month"] == "created"
+
+
+async def test_tick_rolls_back_session_after_guild_failure(temp_db, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", None)
+    _seed(temp_db, guild_id=111, daily_refresh_time="09:00")
+    _seed(temp_db, guild_id=222, daily_refresh_time="09:00")
+    sessions = []
+    usable = []
+
+    async def fake_tick_guild(self, session, guild_id):
+        sessions.append(session)
+        usable.append(session.get(GuildConfig, guild_id) is not None)
+        if guild_id == 111:
+            session.add(Event(guild_id=1, external_id="wp:dup", title="t", url="u"))
+            session.add(Event(guild_id=1, external_id="wp:dup", title="t", url="u"))
+            session.commit()  # flush fails, poisoning the session
+
+    monkeypatch.setattr(RefreshScheduler, "_tick_guild", fake_tick_guild)
+    inst = RefreshScheduler(_bot())
+    await inst.tick.coro(inst)
+
+    assert len(sessions) == 2
+    assert sessions[0] is sessions[1]
+    assert usable == [True, True]  # second guild's query would raise PendingRollbackError
+
+
+async def test_concurrent_refreshes_for_same_guild_serialize(temp_db, monkeypatch):
+    import time
+
+    _seed(temp_db)
+    events = []
+
+    def slow_refresh(session, guild_id, base_url, tz):
+        events.append("fetch_start")
+        time.sleep(0.05)
+        events.append("fetch_end")
+        return {"added": 0}
+
+    async def fake_upsert(bot, session, guild_id, board_type):
+        events.append(f"upsert:{board_type}")
+        return "skipped"
+
+    monkeypatch.setattr("src.services.scheduler.refresh_events", slow_refresh)
+    monkeypatch.setattr("src.services.scheduler.upsert_board", fake_upsert)
+
+    await asyncio.gather(
+        scheduler.run_daily_refresh(MagicMock(), 999),
+        scheduler.run_daily_refresh(MagicMock(), 999),
+    )
+
+    run = ["fetch_start", "fetch_end", "upsert:this_week", "upsert:this_month"]
+    assert events == run + run
+
+
+async def test_refresh_locks_are_per_guild(temp_db, monkeypatch):
+    assert scheduler._get_refresh_lock(1) is scheduler._get_refresh_lock(1)
+    assert scheduler._get_refresh_lock(1) is not scheduler._get_refresh_lock(2)
