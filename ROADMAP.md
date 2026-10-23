@@ -23,10 +23,10 @@ Working memory for the build. Plan: `docs/superpowers/plans/2026-10-23-discord-e
 - [x] Task 9: `/board refresh`, `/board recreate` + daily scheduler loop — incl. off-loop fetch, error-isolated steps, per-board concurrency lock
 - [x] 4-agent council + fixes (reliable trigger + bounded retry, Forbidden handling, recreate hardening; 227 tests green, 0 warnings)
 
-## Milestone 4 — Month rollover ⬜
+## Milestone 4 — Month rollover ✅ (complete 2026-10-23)
 
-- [ ] Task 10: Month rollover + previous-month deletion
-- [ ] 4-agent council + fixes
+- [x] Task 10: Month rollover + previous-month deletion — incl. stored-channel targeting, authorship + guild guards, save-before-delete ordering
+- [x] 4-agent council + fixes (fetch-once-per-day retry semantics + backoff, rollover failure-path hardening; 265 tests green, 0 warnings)
 
 ## Milestone 5 — Hardening ⬜
 
