@@ -160,7 +160,7 @@ class AdminCog(commands.Cog):
                             board_type: str) -> None:
         from zoneinfo import ZoneInfo
         from src.db.repositories import get_active_events, get_or_create_config
-        from src.discord_ui.embeds import build_board_embed
+        from src.discord_ui.embeds import build_board_embed, build_rich_board_embeds
         from src.services.board_service import filter_events_for_board
 
         try:
@@ -169,15 +169,20 @@ class AdminCog(commands.Cog):
                 tz = ZoneInfo(cfg.timezone)
                 events = filter_events_for_board(
                     get_active_events(session, interaction.guild_id), board_type, cfg, tz)
-                embed = build_board_embed(events, board_type.replace("_", " ").title(),
-                                          tz, cfg.include_tba_section)
+                preview_title = board_type.replace("_", " ").title()
+                if board_type == "this_week":
+                    send_kwargs = {"embeds": build_rich_board_embeds(
+                        events, preview_title, tz, cfg.include_tba_section)}
+                else:
+                    send_kwargs = {"embed": build_board_embed(
+                        events, preview_title, tz, cfg.include_tba_section)}
         except Exception as e:
             import logging
             logging.getLogger("hightide").exception("board preview failed")
             await interaction.response.send_message(
                 f"Preview failed: {type(e).__name__}", ephemeral=True)
             return
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(**send_kwargs, ephemeral=True)
 
     @board_group.command(name="refresh")
     async def board_refresh(self, interaction: discord.Interaction) -> None:

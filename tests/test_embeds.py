@@ -409,3 +409,148 @@ def test_many_days_plus_tba_with_include_false():
     assert "Date TBA" not in field_names, "Date TBA should not appear when include_tba=False"
     # UNCONDITIONAL: Later field must be present (overflow from 30 days)
     assert "Later" in field_names, "Expected 'Later' field when 30 days of events overflow"
+
+
+# --- rich per-event cards (this_week board) ---
+
+from src.discord_ui.embeds import build_rich_board_embeds  # noqa: E402
+
+
+def _rich_event(title, starts_at, *, summary=None, image_url=None, url="https://example.com/e",
+                time_known=True, price_text=None):
+    ev = make_event(title, starts_at, time_known=time_known, price_text=price_text)
+    ev.url = url
+    ev.summary = summary
+    ev.image_url = image_url
+    return ev
+
+
+def _dated(n):
+    base = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    return [_rich_event(f"Ev{i}", base + timedelta(hours=i)) for i in range(n)]
+
+
+def _msg_total_chars(embeds):
+    return sum(_total_chars(e) + len(e.author.name or "") for e in embeds)
+
+
+def test_rich_card_fields_present():
+    dt = datetime(2026, 10, 23, 10, 30, tzinfo=timezone.utc)  # Fri 18:30 Perth
+    ev = _rich_event("Card Night", dt, summary="Bring a deck.", price_text="$10",
+                     image_url="https://img.example.com/a.png", url="https://example.com/card")
+    embeds = build_rich_board_embeds([ev], "This Week", TZ, include_tba=False)
+    assert len(embeds) == 1
+    card = embeds[0]
+    assert card.title == "Card Night"
+    assert card.url == "https://example.com/card"
+    assert "Fri 23 Oct · 18:30 · $10" in card.description
+    assert "Bring a deck." in card.description
+    assert card.image.url == "https://img.example.com/a.png"
+
+
+def test_rich_card_without_optional_fields():
+    dt = datetime(2026, 10, 23, 10, 30, tzinfo=timezone.utc)
+    ev = _rich_event("Plain", dt)
+    card = build_rich_board_embeds([ev], "T", TZ, include_tba=False)[0]
+    assert card.description == "Fri 23 Oct · 18:30"
+    assert card.image.url is None
+
+
+@pytest.mark.parametrize("img", ["javascript:alert(1)", "ftp://x/a.png", "nope", ""])
+def test_rich_card_invalid_image_skipped(img):
+    dt = datetime(2026, 10, 23, 10, 30, tzinfo=timezone.utc)
+    card = build_rich_board_embeds([_rich_event("X", dt, image_url=img)], "T", TZ, False)[0]
+    assert card.image.url is None
+
+
+def test_rich_card_time_tbc():
+    dt = datetime(2026, 10, 23, 0, 0, tzinfo=timezone.utc)
+    ev = _rich_event("NoTime", dt, time_known=False, price_text="$5")
+    card = build_rich_board_embeds([ev], "T", TZ, include_tba=False)[0]
+    assert "Fri 23 Oct · time TBC · $5" in card.description
+
+
+def test_rich_card_escapes_summary_and_price():
+    dt = datetime(2026, 10, 23, 10, 30, tzinfo=timezone.utc)
+    ev = _rich_event("T", dt, summary="[x](https://evil.example) @everyone <@123>\n# H",
+                     price_text="$5](https://evil.example) @here")
+    card = build_rich_board_embeds([ev], "T", TZ, include_tba=False)[0]
+    assert "](https://evil.example)" not in card.description
+    assert "@everyone" not in card.description and "@here" not in card.description
+    assert "<@123>" not in card.description
+    assert card.description.count("\n") == 1
+
+
+def test_rich_eight_dated_events_caps_cards_with_overflow():
+    embeds = build_rich_board_embeds(_dated(8), "T", TZ, include_tba=False)
+    assert len(embeds) == 8
+    assert [e.title for e in embeds[:7]] == [f"Ev{i}" for i in range(7)]
+    assert embeds[7].title == "Also this week"
+    assert "Ev7" in embeds[7].description
+    assert "Fri 23 Oct" in embeds[7].description
+
+
+def test_rich_seven_events_no_overflow_embed():
+    embeds = build_rich_board_embeds(_dated(7), "T", TZ, include_tba=False)
+    assert len(embeds) == 7
+    assert all(e.title != "Also this week" for e in embeds)
+
+
+def test_rich_tba_embed_by_flag():
+    dt = datetime(2026, 10, 23, 10, 30, tzinfo=timezone.utc)
+    events = [_rich_event("Dated", dt), _rich_event("Undated", None, url="https://example.com/u")]
+    with_tba = build_rich_board_embeds(events, "T", TZ, include_tba=True)
+    assert with_tba[-1].title == "Date TBA"
+    assert "[Undated](https://example.com/u)" in with_tba[-1].description
+    without = build_rich_board_embeds(events, "T", TZ, include_tba=False)
+    assert all(e.title != "Date TBA" for e in without)
+    assert len(without) == 1
+
+
+def test_rich_tba_hostile_title_escaped():
+    ev = _rich_event(HOSTILE_TITLE, None)
+    embeds = build_rich_board_embeds([ev], "T", TZ, include_tba=True)
+    assert len(embeds) == 1 and embeds[0].title == "Date TBA"
+    assert "](https://evil.example)" not in embeds[0].description
+    assert "@everyone" not in embeds[0].description
+
+
+def test_rich_never_exceeds_ten_embeds():
+    events = _dated(40) + [_rich_event(f"U{i}", None) for i in range(40)]
+    embeds = build_rich_board_embeds(events, "T", TZ, include_tba=True)
+    assert len(embeds) == 9  # 7 cards + overflow + TBA
+    assert [e.title for e in embeds[-2:]] == ["Also this week", "Date TBA"]
+
+
+def test_rich_empty_state_single_embed():
+    embeds = build_rich_board_embeds([], "T", TZ, include_tba=True)
+    assert len(embeds) == 1
+    assert embeds[0].description == "No events found for this period."
+    assert embeds[0].footer.text.startswith("Last updated ")
+
+
+def test_rich_tba_only_not_empty_state():
+    embeds = build_rich_board_embeds([_rich_event("U", None)], "T", TZ, include_tba=True)
+    assert len(embeds) == 1 and embeds[0].title == "Date TBA"
+    assert embeds[0].description != "No events found for this period."
+
+
+def test_rich_footer_on_first_embed_only():
+    events = _dated(8) + [_rich_event("U", None)]
+    embeds = build_rich_board_embeds(events, "T", TZ, include_tba=True)
+    assert embeds[0].footer.text.endswith(" AWST")
+    assert embeds[0].footer.text.startswith("Last updated ")
+    assert all(e.footer.text is None for e in embeds[1:])
+
+
+def test_rich_message_total_within_discord_limit():
+    base = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    events = [
+        _rich_event("T" * 200 + str(i), base + timedelta(hours=i), summary="[" * 280,
+                    price_text="(" * 80, url=f"https://example.com/{i}")
+        for i in range(40)
+    ] + [_rich_event("U" * 200 + str(i), None) for i in range(60)]
+    embeds = build_rich_board_embeds(events, "T", TZ, include_tba=True)
+    assert len(embeds) <= 10
+    assert _msg_total_chars(embeds) <= 6000
+    assert all(len(e.description or "") <= 4096 for e in embeds)

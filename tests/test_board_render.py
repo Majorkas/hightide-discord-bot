@@ -59,6 +59,23 @@ def test_render_hash_changes_with_content():
         render_board_hash(a, "this_week", _cfg(), TZ)
 
 
+def test_render_hash_sensitive_to_summary_and_image():
+    base = _ev("x", 1)
+    base.summary = "one"
+    base.image_url = None
+    same = _ev("x", 1)
+    same.starts_at = base.starts_at
+    same.summary = "one"
+    same.image_url = None
+    h = render_board_hash([base], "this_week", _cfg(), TZ)
+    assert h == render_board_hash([same], "this_week", _cfg(), TZ)
+    same.summary = "two"
+    assert h != render_board_hash([same], "this_week", _cfg(), TZ)
+    same.summary = "one"
+    same.image_url = "https://img.example/a.png"
+    assert h != render_board_hash([same], "this_week", _cfg(), TZ)
+
+
 # --- window boundaries with a fixed clock ---
 
 def _at(*args):

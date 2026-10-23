@@ -208,8 +208,21 @@ async def test_board_preview(db, cog, interaction):
     await cog.board_preview.callback(cog, interaction, "this_week")
     interaction.response.send_message.assert_awaited_once()
     args, kwargs = interaction.response.send_message.call_args
-    assert "embed" in kwargs
+    assert "embed" not in kwargs
+    assert kwargs["ephemeral"] is True
+    assert isinstance(kwargs["embeds"], list) and kwargs["embeds"]
+    assert all(isinstance(e, discord.Embed) for e in kwargs["embeds"])
+    assert kwargs["embeds"][0].title == "Test Event"
+
+
+async def test_board_preview_this_month_single_embed(db, cog, interaction):
+    with db() as s:
+        s.add(GuildConfig(guild_id=GUILD, timezone="Australia/Perth"))
+        s.commit()
+    await cog.board_preview.callback(cog, interaction, "this_month")
+    _, kwargs = interaction.response.send_message.call_args
     assert isinstance(kwargs["embed"], discord.Embed)
+    assert "embeds" not in kwargs
 
 
 async def test_board_refresh_success(db, cog, interaction, monkeypatch):

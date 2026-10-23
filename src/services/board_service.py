@@ -10,7 +10,7 @@ from src.db.models import Event
 from src.db.repositories import (
     get_active_events, get_board_post, get_or_create_config, save_board_post,
 )
-from src.discord_ui.embeds import build_board_embed
+from src.discord_ui.embeds import build_board_embed, build_rich_board_embeds
 
 log = logging.getLogger("hightide.board")
 
@@ -70,7 +70,8 @@ def filter_events_for_board(events: list[Event], board_type: str, cfg, tz, *,
 def render_board_hash(events: list[Event], board_type: str, cfg, tz) -> str:
     parts = [board_type, str(tz)]
     for e in sorted(events, key=lambda x: (x.starts_at or datetime.max.replace(tzinfo=tz), x.title, x.external_id)):
-        parts.append(f"{e.external_id}|{e.title}|{e.starts_at}|{e.price_text}|{e.time_known}|{e.url}")
+        parts.append(f"{e.external_id}|{e.title}|{e.starts_at}|{e.price_text}|{e.time_known}|{e.url}"
+                     f"|{e.summary}|{e.image_url}")
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -96,7 +97,10 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
     new_hash = render_board_hash(events, board_type, cfg, tz)
     key = period_key(board_type, tz, now=now)
     title = "This Week at Hightide" if board_type == "this_week" else "This Month at Hightide"
-    embed = build_board_embed(events, title, tz, cfg.include_tba_section)
+    if board_type == "this_week":
+        payload = {"embeds": build_rich_board_embeds(events, title, tz, cfg.include_tba_section)}
+    else:
+        payload = {"embed": build_board_embed(events, title, tz, cfg.include_tba_section)}
 
     channel = bot.get_channel(tz_channel) or await bot.fetch_channel(tz_channel)
     post = get_board_post(session, guild_id, board_type)
@@ -117,7 +121,7 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
             return "skipped"
 
         try:
-            await msg.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await msg.edit(**payload, allowed_mentions=discord.AllowedMentions.none())
         except discord.NotFound:
             log.info("board message missing for %s, recreating", board_type)
         else:
@@ -131,7 +135,7 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
         prefetched_old = msg
         old_channel_id = post.channel_id
         old_message_id = post.message_id
-        new_msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        new_msg = await channel.send(**payload, allowed_mentions=discord.AllowedMentions.none())
         # Save before delete to avoid orphaned message if delete fails
         try:
             save_board_post(session, guild_id, board_type, key,
@@ -167,7 +171,7 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
         return "recreated"
 
     # Send new message (no existing post or edit failed)
-    msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    msg = await channel.send(**payload, allowed_mentions=discord.AllowedMentions.none())
     try:
         save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)
     except Exception:

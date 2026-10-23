@@ -281,3 +281,41 @@ async def test_concurrent_upserts_serialised_by_lock(session):
 
     assert sorted(results) == ["created", "skipped"]
     assert channel.send.await_count == 1
+
+
+async def test_this_week_send_uses_embeds_list(session):
+    _seed(session)
+    channel = _channel()
+    channel.send = AsyncMock(return_value=_message(555))
+    assert await upsert_board(_bot(channel), session, GUILD, "this_week") == "created"
+    kwargs = channel.send.call_args.kwargs
+    assert "embed" not in kwargs
+    assert isinstance(kwargs["embeds"], list) and kwargs["embeds"][0].title == "e1"
+    assert kwargs["allowed_mentions"].everyone is False
+
+
+async def test_this_week_edit_uses_embeds_list(session):
+    _seed(session)
+    channel = _channel()
+    channel.send = AsyncMock(return_value=_message(555))
+    await upsert_board(_bot(channel), session, GUILD, "this_week")
+    existing = _message(555)
+    channel.fetch_message = AsyncMock(return_value=existing)
+    ev = session.query(Event).one()
+    ev.summary = "changed summary"
+    session.commit()
+    assert await upsert_board(_bot(channel), session, GUILD, "this_week") == "edited"
+    kwargs = existing.edit.call_args.kwargs
+    assert "embed" not in kwargs
+    assert "changed summary" in kwargs["embeds"][0].description
+    assert kwargs["allowed_mentions"].roles is False
+
+
+async def test_this_month_still_single_embed(session):
+    _seed(session)
+    channel = _channel(222)
+    channel.send = AsyncMock(return_value=_message(777))
+    await upsert_board(_bot(channel), session, GUILD, "this_month")
+    kwargs = channel.send.call_args.kwargs
+    assert isinstance(kwargs["embed"], discord.Embed)
+    assert "embeds" not in kwargs
