@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from discord.ext import tasks
+from sqlalchemy import select
 
 from src import config
+from src.db.models import GuildConfig
 from src.db.repositories import get_or_create_config
 from src.db.session import get_session_factory
 from src.services.board_service import upsert_board
@@ -77,55 +79,76 @@ async def run_daily_refresh(bot, guild_id: int, *, fetch: bool = True) -> dict:
 class RefreshScheduler:
     def __init__(self, bot):
         self.bot = bot
-        self._last_run_key: str | None = None
-        self._last_attempt: datetime | None = None
-        self._events_done_key: str | None = None
-        self._retry_delay: timedelta = _RETRY_INTERVAL
-        self._next_attempt: datetime | None = None
-        self._backoff_day: str | None = None
+        # Per-guild state keyed by guild_id so one guild's failure can't affect another.
+        self._last_run_key: dict[int, str] = {}
+        self._last_attempt: dict[int, datetime] = {}
+        self._events_done_key: dict[int, str] = {}
+        self._retry_delay: dict[int, timedelta] = {}
+        self._next_attempt: dict[int, datetime | None] = {}
+        self._backoff_day: dict[int, str] = {}
+        self._idle_logged = False
 
     def start(self):
         self.tick.start()
 
+    def _guild_ids(self, session) -> list[int]:
+        if config.GUILD_ID is not None:
+            return [config.GUILD_ID]
+        return list(session.scalars(select(GuildConfig.guild_id).order_by(GuildConfig.guild_id)))
+
+    async def _tick_guild(self, session, guild_id: int) -> None:
+        cfg = get_or_create_config(session, guild_id)
+        tz = ZoneInfo(cfg.timezone)
+        now = _now(tz)
+        today = now.strftime("%Y-%m-%d")
+        if self._backoff_day.get(guild_id) != today:
+            # Backoff is per-day: a bad day must not delay the next day's run.
+            self._backoff_day[guild_id] = today
+            self._retry_delay[guild_id] = _RETRY_INTERVAL
+            self._next_attempt[guild_id] = None
+        next_attempt = self._next_attempt.get(guild_id)
+        if not (_in_run_window(cfg.daily_refresh_time, now)
+                and self._last_run_key.get(guild_id) != today
+                and (next_attempt is None or now >= next_attempt)):
+            return
+        self._last_attempt[guild_id] = now
+        fetch = self._events_done_key.get(guild_id) != today
+        failed = True
+        try:
+            result = await run_daily_refresh(self.bot, cfg.guild_id, fetch=fetch)
+            has_error = any(
+                isinstance(v, str) and v.startswith("error:")
+                for v in result.values()
+            )
+            if isinstance(result.get("events"), dict):
+                self._events_done_key[guild_id] = today
+            if not has_error:
+                self._last_run_key[guild_id] = today
+                self._retry_delay[guild_id] = _RETRY_INTERVAL
+                self._next_attempt[guild_id] = None
+                failed = False
+        finally:
+            if failed:
+                delay = self._retry_delay.get(guild_id, _RETRY_INTERVAL)
+                self._next_attempt[guild_id] = now + delay
+                self._retry_delay[guild_id] = min(delay * 2, _MAX_RETRY_DELAY)
+
     @tasks.loop(seconds=60)
     async def tick(self):
         await self.bot.wait_until_ready()
-        if config.GUILD_ID is None:
-            log.debug("GUILD_ID not configured, skipping scheduler tick")
-            return
-        with _get_session_factory()() as session:
-            try:
-                cfg = get_or_create_config(session, config.GUILD_ID)
-                tz = ZoneInfo(cfg.timezone)
-                now = _now(tz)
-                today = now.strftime("%Y-%m-%d")
-                if self._backoff_day != today:
-                    # Backoff is per-day: a bad day must not delay the next day's run.
-                    self._backoff_day = today
-                    self._retry_delay = _RETRY_INTERVAL
-                    self._next_attempt = None
-                if (_in_run_window(cfg.daily_refresh_time, now)
-                        and self._last_run_key != today
-                        and (self._next_attempt is None or now >= self._next_attempt)):
-                    self._last_attempt = now
-                    fetch = self._events_done_key != today
-                    failed = True
+        try:
+            with _get_session_factory()() as session:
+                guild_ids = self._guild_ids(session)
+                if not guild_ids:
+                    if not self._idle_logged:
+                        log.info("scheduler idle — no guild configured yet")
+                        self._idle_logged = True
+                    return
+                self._idle_logged = False
+                for guild_id in guild_ids:
                     try:
-                        result = await run_daily_refresh(self.bot, cfg.guild_id, fetch=fetch)
-                        has_error = any(
-                            isinstance(v, str) and v.startswith("error:")
-                            for v in result.values()
-                        )
-                        if isinstance(result.get("events"), dict):
-                            self._events_done_key = today
-                        if not has_error:
-                            self._last_run_key = today
-                            self._retry_delay = _RETRY_INTERVAL
-                            self._next_attempt = None
-                            failed = False
-                    finally:
-                        if failed:
-                            self._next_attempt = now + self._retry_delay
-                            self._retry_delay = min(self._retry_delay * 2, _MAX_RETRY_DELAY)
-            except Exception:
-                log.exception("scheduler tick failed")
+                        await self._tick_guild(session, guild_id)
+                    except Exception:
+                        log.exception("scheduler tick failed for guild %s", guild_id)
+        except Exception:
+            log.exception("scheduler tick failed")

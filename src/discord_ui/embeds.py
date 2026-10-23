@@ -13,11 +13,13 @@ MAX_FIELD_VALUE_CHARS = 1024
 MAX_EMBED_CHARS = 6000
 
 _MD_EXTRA = re.compile(r"([\[\]()<>])")
+_BIDI = re.compile("[\u202a-\u202e\u2066-\u2069]")
 _URL_UNSAFE = re.compile(r"[()<>\s\x00-\x1f\x7f]")
 
 
 def _md_escape(s: str) -> str:
     """Neutralise markdown, links and mentions in scraped text."""
+    s = _BIDI.sub("", s)
     s = re.sub(r"\s*[\r\n]+\s*", " ", s)
     s = discord.utils.escape_markdown(s)
     s = _MD_EXTRA.sub(r"\\\1", s)

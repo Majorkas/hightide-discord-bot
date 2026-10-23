@@ -44,9 +44,9 @@ class UserCog(commands.Cog):
                     "this_week", cfg, tz)
                 embed = build_board_embed(events, "Upcoming Events", tz,
                                           cfg.include_tba_section)
-        except Exception as e:
+        except Exception:
             log.exception("events upcoming failed")
             await interaction.response.send_message(
-                f"Could not load events: {type(e).__name__}", ephemeral=True)
+                "Could not load events right now — try again later.", ephemeral=True)
             return
         await interaction.response.send_message(embed=embed, ephemeral=True)
