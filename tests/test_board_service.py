@@ -104,12 +104,40 @@ def test_week_start_mode_now():
 
 
 def test_render_hash_includes_url():
-    """Hash changes when event URL differs."""
-    ev1 = _ev("event", 1, url="https://a.com")
-    ev2 = _ev("event", 1, url="https://b.com")
-    hash1 = render_board_hash([ev1], "this_week", _cfg(), TZ)
-    hash2 = render_board_hash([ev2], "this_week", _cfg(), TZ)
-    assert hash1 != hash2
+    """Hash changes when event URL differs; identical events (including url) produce equal hashes."""
+    now = datetime.now(TZ)
+    ev1_diff_url = Event(
+        guild_id=999,
+        external_id="wp:event",
+        title="event",
+        url="https://a.com",
+        starts_at=now,
+        time_known=True,
+        is_active=True,
+    )
+    ev2_diff_url = Event(
+        guild_id=999,
+        external_id="wp:event",
+        title="event",
+        url="https://b.com",
+        starts_at=now,
+        time_known=True,
+        is_active=True,
+    )
+    ev3_same_url = Event(
+        guild_id=999,
+        external_id="wp:event",
+        title="event",
+        url="https://a.com",
+        starts_at=now,
+        time_known=True,
+        is_active=True,
+    )
+    hash1 = render_board_hash([ev1_diff_url], "this_week", _cfg(), TZ)
+    hash2 = render_board_hash([ev2_diff_url], "this_week", _cfg(), TZ)
+    hash3 = render_board_hash([ev3_same_url], "this_week", _cfg(), TZ)
+    assert hash1 != hash2, "Hashes must differ when URL differs"
+    assert hash1 == hash3, "Hashes must be identical when all fields including URL are identical"
 
 
 def test_render_hash_includes_timezone():
@@ -304,8 +332,9 @@ async def test_upsert_board_channel_moved(session):
     channel_new = _create_mock_channel(222)
     new_msg = _create_mock_message(777)
     channel_new.send = AsyncMock(return_value=new_msg)
-    # Old message ID not found in new channel
-    channel_new.fetch_message = AsyncMock(side_effect=_create_not_found_exception())
+    # Old message exists in new channel, but channel_id check must catch that stored post.channel_id != 222
+    old_existing_msg = _create_mock_message(555)
+    channel_new.fetch_message = AsyncMock(return_value=old_existing_msg)
     
     bot.get_channel = MagicMock(return_value=channel_new)
     bot.fetch_channel = AsyncMock(return_value=channel_new)
@@ -315,6 +344,6 @@ async def test_upsert_board_channel_moved(session):
     channel_new.send.reset_mock()
     
     result2 = await upsert_board(bot, session, 999, "this_week")
-    # Should create in new channel (not skip, because channel.id mismatch)
+    # Should create in new channel (not skip/edit, because stored post.channel_id differs from new channel.id)
     assert result2 == "created"
     channel_new.send.assert_called_once()
