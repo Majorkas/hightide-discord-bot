@@ -171,3 +171,29 @@ class AdminCog(commands.Cog):
             embed = build_board_embed(events, board_type.replace("_", " ").title(),
                                       tz, cfg.include_tba_section)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @board_group.command(name="refresh")
+    async def board_refresh(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        from src.services.scheduler import run_daily_refresh
+        result = await run_daily_refresh(self.bot, interaction.guild_id)
+        await interaction.followup.send(f"Refresh complete: `{result}`", ephemeral=True)
+
+    @board_group.command(name="recreate")
+    @app_commands.choices(board_type=[
+        app_commands.Choice(name="this_week", value="this_week"),
+        app_commands.Choice(name="this_month", value="this_month"),
+    ])
+    async def board_recreate(self, interaction: discord.Interaction,
+                             board_type: str) -> None:
+        from src.db.repositories import get_board_post
+        from src.services.board_service import upsert_board
+        session = _session()
+        post = get_board_post(session, interaction.guild_id, board_type)
+        if post:
+            session.delete(post)
+            session.commit()
+        action = await upsert_board(self.bot, session, interaction.guild_id, board_type)
+        session.close()
+        await interaction.response.send_message(
+            f"{board_type} board action: {action}", ephemeral=True)

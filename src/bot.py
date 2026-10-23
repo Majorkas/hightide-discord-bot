@@ -29,6 +29,8 @@ def create_bot() -> commands.Bot:
         Base.metadata.create_all(engine)
         from src.discord_ui.commands_user import UserCog
         await bot.add_cog(UserCog(bot))
+        from src.services.scheduler import RefreshScheduler
+        RefreshScheduler(bot).start()
         if config.GUILD_ID:
             guild = discord.Object(id=config.GUILD_ID)
             bot.tree.copy_global_to(guild=guild)
