@@ -14,6 +14,7 @@ from src.discord_ui import commands_admin
 from src.discord_ui.commands_admin import AdminCog
 
 GUILD = 12345
+BOT_ID = 777
 
 
 @pytest.fixture
@@ -212,15 +213,16 @@ async def test_board_refresh_success(db, cog, interaction, monkeypatch):
     """Test /board refresh success path sends a followup with refresh stats."""
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    
+
     mock_refresh = AsyncMock(return_value={"events": {"added": 1}, "this_week": "created", "this_month": "skipped"})
     monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
-    
+
     await cog.board_refresh.callback(cog, interaction)
-    
+
     # Verify defer was called first
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-    
+    mock_refresh.assert_awaited_once_with(cog.bot, GUILD)
+
     # Verify followup was sent with success message
     interaction.followup.send.assert_awaited_once()
     args, kwargs = interaction.followup.send.call_args
@@ -232,16 +234,16 @@ async def test_board_refresh_error(db, cog, interaction, monkeypatch):
     """Test /board refresh error path sends failure followup without propagating."""
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    
+
     mock_refresh = AsyncMock(side_effect=RuntimeError("Test error"))
     monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
-    
+
     # Should not raise
     await cog.board_refresh.callback(cog, interaction)
-    
+
     # Verify defer was called
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-    
+
     # Verify error followup was sent
     interaction.followup.send.assert_awaited_once()
     args, kwargs = interaction.followup.send.call_args
@@ -255,7 +257,7 @@ async def test_board_recreate_with_existing_post(db, cog, interaction, monkeypat
     """Test /board recreate deletes old message and DB row, then upserts."""
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    
+
     # Seed DB with a board post
     from src.db.models import BoardPost
     with db() as s:
@@ -265,36 +267,38 @@ async def test_board_recreate_with_existing_post(db, cog, interaction, monkeypat
         )
         s.add(post)
         s.commit()
-    
+
     # Mock Discord message fetch and delete
     mock_channel = MagicMock()
     mock_message = AsyncMock()
+    mock_message.author.id = BOT_ID
     mock_message.delete = AsyncMock()
     mock_channel.fetch_message = AsyncMock(return_value=mock_message)
     cog.bot.get_channel = MagicMock(return_value=mock_channel)
-    
+    cog.bot.user.id = BOT_ID
+
     # Mock upsert_board
     mock_upsert = AsyncMock(return_value="created")
     monkeypatch.setattr("src.services.board_service.upsert_board", mock_upsert)
-    
+
     await cog.board_recreate.callback(cog, interaction, "this_week")
-    
+
     # Verify defer was called
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-    
+
     # Verify old message was deleted
     mock_channel.fetch_message.assert_awaited_once_with(555)
     mock_message.delete.assert_awaited_once()
-    
+
     # Verify DB row was deleted
     with db() as s:
         from src.db.repositories import get_board_post
         post = get_board_post(s, GUILD, "this_week")
         assert post is None
-    
+
     # Verify upsert was called
     mock_upsert.assert_awaited_once()
-    
+
     # Verify followup was sent
     interaction.followup.send.assert_awaited_once()
     args, kwargs = interaction.followup.send.call_args
@@ -307,7 +311,7 @@ async def test_board_recreate_message_not_found(db, cog, interaction, monkeypatc
     """Test /board recreate handles discord.NotFound when deleting old message."""
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    
+
     # Seed DB with a board post
     from src.db.models import BoardPost
     with db() as s:
@@ -317,7 +321,7 @@ async def test_board_recreate_message_not_found(db, cog, interaction, monkeypatc
         )
         s.add(post)
         s.commit()
-    
+
     # Mock Discord message fetch to raise NotFound
     mock_channel = MagicMock()
     mock_response = MagicMock()
@@ -325,23 +329,23 @@ async def test_board_recreate_message_not_found(db, cog, interaction, monkeypatc
     mock_response.reason = 'Not Found'
     mock_channel.fetch_message = AsyncMock(side_effect=discord.NotFound(mock_response, "message not found"))
     cog.bot.get_channel = MagicMock(return_value=mock_channel)
-    
+
     # Mock upsert_board
     mock_upsert = AsyncMock(return_value="created")
     monkeypatch.setattr("src.services.board_service.upsert_board", mock_upsert)
-    
+
     # Should not raise even though message is missing
     await cog.board_recreate.callback(cog, interaction, "this_week")
-    
+
     # DB row should still be deleted
     with db() as s:
         from src.db.repositories import get_board_post
         post = get_board_post(s, GUILD, "this_week")
         assert post is None
-    
+
     # Upsert should still be called
     mock_upsert.assert_awaited_once()
-    
+
     # Followup should be sent
     interaction.followup.send.assert_awaited_once()
 
@@ -350,20 +354,117 @@ async def test_board_recreate_no_existing_post(db, cog, interaction, monkeypatch
     """Test /board recreate skips deletion when no prior post exists."""
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
-    
+
     # No prior post in DB
-    
+
     # Mock upsert_board
     mock_upsert = AsyncMock(return_value="created")
     monkeypatch.setattr("src.services.board_service.upsert_board", mock_upsert)
-    
+
     await cog.board_recreate.callback(cog, interaction, "this_month")
-    
+
     # Upsert should be called
     mock_upsert.assert_awaited_once()
-    
+
     # Followup should be sent
     interaction.followup.send.assert_awaited_once()
     args, kwargs = interaction.followup.send.call_args
     assert "this_month" in args[0]
     assert kwargs.get("ephemeral") is True
+
+
+# --- /board recreate hardening ---
+
+def _seed_post(db):
+    from src.db.models import BoardPost
+    with db() as s:
+        s.add(BoardPost(guild_id=GUILD, board_type="this_week", period_key="2026-W43",
+                        channel_id=111, message_id=555, render_hash="old"))
+        s.commit()
+
+
+def _post_exists(db) -> bool:
+    from src.db.repositories import get_board_post
+    with db() as s:
+        return get_board_post(s, GUILD, "this_week") is not None
+
+
+def _recreate_setup(db, cog, interaction, monkeypatch, upsert=None, author_id=BOT_ID):
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    _seed_post(db)
+    message = AsyncMock()
+    message.author.id = author_id
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    cog.bot.get_channel = MagicMock(return_value=channel)
+    cog.bot.fetch_channel = AsyncMock(return_value=channel)
+    cog.bot.user.id = BOT_ID
+    upsert = upsert or AsyncMock(return_value="created")
+    monkeypatch.setattr("src.services.board_service.upsert_board", upsert)
+    return message, channel, upsert
+
+
+async def test_board_recreate_upsert_failure_sends_ephemeral_followup(db, cog, interaction, monkeypatch):
+    upsert = AsyncMock(side_effect=RuntimeError("kaput"))
+    _recreate_setup(db, cog, interaction, monkeypatch, upsert=upsert)
+
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+
+    interaction.followup.send.assert_awaited_once()
+    args, kwargs = interaction.followup.send.call_args
+    assert "failed" in args[0].lower()
+    assert "RuntimeError" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_board_recreate_forbidden_on_delete_still_completes(db, cog, interaction, monkeypatch):
+    message, _, upsert = _recreate_setup(db, cog, interaction, monkeypatch)
+    response = MagicMock()
+    response.status = 403
+    message.delete = AsyncMock(side_effect=discord.Forbidden(response, "nope"))
+
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+
+    assert not _post_exists(db)
+    upsert.assert_awaited_once()
+    args, kwargs = interaction.followup.send.call_args
+    assert "created" in args[0]
+    assert kwargs.get("ephemeral") is True
+
+
+async def test_board_recreate_get_channel_none_falls_back_to_fetch_channel(db, cog, interaction, monkeypatch):
+    message, channel, upsert = _recreate_setup(db, cog, interaction, monkeypatch)
+    cog.bot.get_channel = MagicMock(return_value=None)
+
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+
+    cog.bot.fetch_channel.assert_awaited_once_with(111)
+    channel.fetch_message.assert_awaited_once_with(555)
+    message.delete.assert_awaited_once()
+    upsert.assert_awaited_once()
+
+
+async def test_board_recreate_skips_delete_for_non_bot_message(db, cog, interaction, monkeypatch):
+    message, _, upsert = _recreate_setup(db, cog, interaction, monkeypatch, author_id=BOT_ID + 1)
+
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+
+    message.delete.assert_not_awaited()
+    assert not _post_exists(db)
+    upsert.assert_awaited_once()
+
+
+async def test_board_recreate_upserts_after_row_deleted(db, cog, interaction, monkeypatch):
+    seen = {}
+
+    async def upsert(bot, session, guild_id, board_type):
+        from src.db.repositories import get_board_post
+        seen["row_present"] = get_board_post(session, guild_id, board_type) is not None
+        return "created"
+
+    _recreate_setup(db, cog, interaction, monkeypatch, upsert=AsyncMock(side_effect=upsert))
+
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+
+    assert seen == {"row_present": False}

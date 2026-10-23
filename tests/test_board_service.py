@@ -1,12 +1,11 @@
 import pytest
 from datetime import datetime, time, timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 from zoneinfo import ZoneInfo
 
 import discord
 
-from src.db.models import Event, GuildConfig, BoardPost
+from src.db.models import Event, GuildConfig
 from src.services.board_service import upsert_board, filter_events_for_board, render_board_hash
 
 
@@ -156,7 +155,7 @@ async def test_upsert_board_no_channel(session):
     cfg = _cfg(this_week_channel_id=None)
     session.add(cfg)
     session.commit()
-    
+
     bot = AsyncMock()
     result = await upsert_board(bot, session, 999, "this_week")
     assert result == "no_channel"
@@ -168,19 +167,19 @@ async def test_upsert_board_fresh_creates(session):
     cfg = _cfg()
     session.add(cfg)
     session.commit()
-    
+
     ev = _ev("event1", 1)
     session.add(ev)
     session.commit()
-    
+
     channel = _create_mock_channel(111)
     msg = _create_mock_message(555)
     channel.send = AsyncMock(return_value=msg)
-    
+
     bot = AsyncMock()
     bot.get_channel = MagicMock(return_value=channel)
     bot.fetch_channel = AsyncMock(return_value=channel)
-    
+
     result = await upsert_board(bot, session, 999, "this_week")
     assert result == "created"
     channel.send.assert_called_once()
@@ -197,28 +196,30 @@ async def test_upsert_board_identical_skipped(session):
     cfg = _cfg()
     session.add(cfg)
     session.commit()
-    
+
     ev = _ev("event1", 1)
     session.add(ev)
     session.commit()
-    
+
     channel = _create_mock_channel(111)
     msg = _create_mock_message(555)
     channel.send = AsyncMock(return_value=msg)
     channel.fetch_message = AsyncMock(return_value=msg)
-    
+
     bot = AsyncMock()
     bot.get_channel = MagicMock(return_value=channel)
     bot.fetch_channel = AsyncMock(return_value=channel)
-    
+
     # First run creates
     result1 = await upsert_board(bot, session, 999, "this_week")
     assert result1 == "created"
-    
+
     # Second run with same events
     result2 = await upsert_board(bot, session, 999, "this_week")
     assert result2 == "skipped"
     channel.fetch_message.assert_called_with(555)
+    msg.edit.assert_not_awaited()
+    assert channel.send.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -227,31 +228,31 @@ async def test_upsert_board_deleted_message_recreated(session):
     cfg = _cfg()
     session.add(cfg)
     session.commit()
-    
+
     ev = _ev("event1", 1)
     session.add(ev)
     session.commit()
-    
+
     channel = _create_mock_channel(111)
     msg = _create_mock_message(555)
     channel.send = AsyncMock(return_value=msg)
-    
+
     bot = AsyncMock()
     bot.get_channel = MagicMock(return_value=channel)
     bot.fetch_channel = AsyncMock(return_value=channel)
-    
+
     # First run creates
     result1 = await upsert_board(bot, session, 999, "this_week")
     assert result1 == "created"
-    
+
     # Reset send mock
     channel.send.reset_mock()
-    
+
     # Second run: message deleted
     channel.fetch_message = AsyncMock(side_effect=_create_not_found_exception())
     new_msg = _create_mock_message(666)
     channel.send = AsyncMock(return_value=new_msg)
-    
+
     result2 = await upsert_board(bot, session, 999, "this_week")
     assert result2 == "created"
     channel.send.assert_called_once()
@@ -263,34 +264,34 @@ async def test_upsert_board_content_changed_edited(session):
     cfg = _cfg()
     session.add(cfg)
     session.commit()
-    
+
     ev1 = _ev("event1", 1)
     session.add(ev1)
     session.commit()
-    
+
     channel = _create_mock_channel(111)
     msg = _create_mock_message(555)
     channel.send = AsyncMock(return_value=msg)
     channel.fetch_message = AsyncMock(return_value=msg)
-    
+
     bot = AsyncMock()
     bot.get_channel = MagicMock(return_value=channel)
     bot.fetch_channel = AsyncMock(return_value=channel)
-    
+
     # First run creates
     result1 = await upsert_board(bot, session, 999, "this_week")
     assert result1 == "created"
-    
+
     # Add second event (changes hash)
     ev2 = _ev("event2", 2)
     session.add(ev2)
     session.commit()
-    
+
     # Reset mocks
     channel.send.reset_mock()
     msg.edit.reset_mock()
     channel.fetch_message.reset_mock()
-    
+
     result2 = await upsert_board(bot, session, 999, "this_week")
     assert result2 == "edited"
     msg.edit.assert_called_once()
@@ -307,42 +308,42 @@ async def test_upsert_board_channel_moved(session):
     cfg = _cfg(this_week_channel_id=111)
     session.add(cfg)
     session.commit()
-    
+
     ev = _ev("event1", 1)
     session.add(ev)
     session.commit()
-    
+
     channel_old = _create_mock_channel(111)
     msg = _create_mock_message(555)
     channel_old.send = AsyncMock(return_value=msg)
-    
+
     bot = AsyncMock()
     bot.get_channel = MagicMock(return_value=channel_old)
     bot.fetch_channel = AsyncMock(return_value=channel_old)
-    
+
     # First run creates in channel 111
     result1 = await upsert_board(bot, session, 999, "this_week")
     assert result1 == "created"
-    
+
     # Admin changes channel config to 222
     cfg = session.get(GuildConfig, 999)
     cfg.this_week_channel_id = 222
     session.commit()
-    
+
     channel_new = _create_mock_channel(222)
     new_msg = _create_mock_message(777)
     channel_new.send = AsyncMock(return_value=new_msg)
     # Old message exists in new channel, but channel_id check must catch that stored post.channel_id != 222
     old_existing_msg = _create_mock_message(555)
     channel_new.fetch_message = AsyncMock(return_value=old_existing_msg)
-    
+
     bot.get_channel = MagicMock(return_value=channel_new)
     bot.fetch_channel = AsyncMock(return_value=channel_new)
-    
+
     # Reset mocks
     channel_old.send.reset_mock()
     channel_new.send.reset_mock()
-    
+
     result2 = await upsert_board(bot, session, 999, "this_week")
     # Should create in new channel (not skip/edit, because stored post.channel_id differs from new channel.id)
     assert result2 == "created"

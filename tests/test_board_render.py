@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from src.db.models import Event
-from src.services.board_service import filter_events_for_board, render_board_hash
+from src.services.board_service import filter_events_for_board, period_key, render_board_hash
 
 TZ = ZoneInfo("Australia/Perth")
 
@@ -57,3 +57,96 @@ def test_render_hash_changes_with_content():
         render_board_hash(b, "this_week", _cfg(), TZ)
     assert render_board_hash(a, "this_week", _cfg(), TZ) == \
         render_board_hash(a, "this_week", _cfg(), TZ)
+
+
+# --- window boundaries with a fixed clock ---
+
+def _at(*args):
+    return datetime(*args, tzinfo=TZ)
+
+
+def _ev_at(title, starts_at, **kw):
+    return Event(guild_id=1, external_id=f"wp:{title}", title=title, url="https://x",
+                 starts_at=starts_at, time_known=True, is_active=True, **kw)
+
+
+def _titles(events, board, now, cfg=None):
+    return {e.title for e in filter_events_for_board(events, board, cfg or _cfg(), TZ, now=now)}
+
+
+def test_month_first_midnight_included():
+    now = _at(2026, 10, 15, 12, 0)
+    assert _titles([_ev_at("first", _at(2026, 10, 1, 0, 0))], "this_month", now) == {"first"}
+
+
+def test_month_last_minute_included():
+    now = _at(2026, 10, 15, 12, 0)
+    assert _titles([_ev_at("last", _at(2026, 10, 31, 23, 59))], "this_month", now) == {"last"}
+
+
+def test_next_month_first_midnight_excluded():
+    now = _at(2026, 10, 15, 12, 0)
+    assert _titles([_ev_at("next", _at(2026, 11, 1, 0, 0))], "this_month", now) == set()
+
+
+def test_december_rolls_over_to_january():
+    now = _at(2026, 12, 15, 12, 0)
+    events = [
+        _ev_at("dec1", _at(2026, 12, 1, 0, 0)),
+        _ev_at("dec31", _at(2026, 12, 31, 23, 59)),
+        _ev_at("jan1", _at(2027, 1, 1, 0, 0)),
+        _ev_at("nov30", _at(2026, 11, 30, 23, 59)),
+    ]
+    assert _titles(events, "this_month", now) == {"dec1", "dec31"}
+
+
+def test_utc_event_lands_in_local_month():
+    """2026-10-31T17:00Z is Nov 1 01:00 in Perth: November, not October."""
+    ev = _ev_at("edge", datetime(2026, 10, 31, 17, 0, tzinfo=ZoneInfo("UTC")))
+    assert _titles([ev], "this_month", _at(2026, 10, 15, 12, 0)) == set()
+    assert _titles([ev], "this_month", _at(2026, 11, 15, 12, 0)) == {"edge"}
+
+
+def test_today_start_vs_now_discrimination():
+    now = _at(2026, 10, 23, 15, 0)
+    ev = [_ev_at("morning", _at(2026, 10, 23, 10, 0))]
+    assert _titles(ev, "this_week", now, _cfg(week_start_mode="today_start")) == {"morning"}
+    assert _titles(ev, "this_week", now, _cfg(week_start_mode="now")) == set()
+
+
+def test_period_key_with_fixed_now():
+    assert period_key("this_month", TZ, now=_at(2026, 12, 31, 23, 0)) == "2026-12"
+    assert period_key("this_week", TZ, now=_at(2026, 10, 23, 12, 0)) == "2026-W43"
+
+
+# --- hash sensitivity and ordering ---
+
+def _hash_ev(**kw):
+    base = dict(guild_id=1, external_id="wp:h", title="h", url="https://x",
+                starts_at=_at(2026, 10, 23, 10, 0), time_known=True,
+                price_text="$10", is_active=True)
+    base.update(kw)
+    return Event(**base)
+
+
+def _h(*events):
+    return render_board_hash(list(events), "this_week", _cfg(), TZ)
+
+
+def test_hash_sensitive_to_price_text():
+    assert _h(_hash_ev(price_text="$10")) != _h(_hash_ev(price_text="$12"))
+
+
+def test_hash_sensitive_to_time_known():
+    assert _h(_hash_ev(time_known=True)) != _h(_hash_ev(time_known=False))
+
+
+def test_hash_sensitive_to_starts_at():
+    assert _h(_hash_ev(starts_at=_at(2026, 10, 23, 10, 0))) != \
+        _h(_hash_ev(starts_at=_at(2026, 10, 23, 11, 0)))
+
+
+def test_hash_total_order_independent_of_input_order():
+    a = _hash_ev(external_id="wp:a")
+    b = _hash_ev(external_id="wp:b")
+    assert _h(a, b) == _h(b, a)
