@@ -18,3 +18,6 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore:.*audioop.*:DeprecationWarning:discord",
+]

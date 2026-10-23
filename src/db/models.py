@@ -17,31 +17,18 @@ class TZDateTime(TypeDecorator):
     impl = DateTime(timezone=True)
     cache_ok = True
 
-    def bind_processor(self, dialect):
-        def process_value(value):
-            if value is None:
-                return None
-            if not isinstance(value, datetime):
-                return value
-            if value.tzinfo is None:
-                raise ValueError(f"DateTime {value} must be timezone-aware")
-            # Convert to UTC
-            return value.astimezone(timezone.utc)
-        return process_value
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError(f"DateTime {value} must be timezone-aware")
+        return value.astimezone(timezone.utc)
 
-    def result_processor(self, dialect, coltype):
-        def process_value(value):
-            if value is None:
-                return None
-            # SQLite returns datetime strings; parse them
-            if isinstance(value, str):
-                # Parse ISO format string (e.g., "2026-10-23 14:30:00.000000")
-                value = datetime.fromisoformat(value)
-            if isinstance(value, datetime) and value.tzinfo is None:
-                # SQLite returns naive datetimes; attach UTC
-                return value.replace(tzinfo=timezone.utc)
-            return value
-        return process_value
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        # SQLite drops tzinfo; everything is stored as UTC.
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 class GuildConfig(Base):
@@ -90,6 +77,7 @@ class Event(Base):
 
 class BoardPost(Base):
     __tablename__ = "board_posts"
+    __table_args__ = (UniqueConstraint("guild_id", "board_type"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     guild_id: Mapped[int] = mapped_column(Integer)
