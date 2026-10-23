@@ -163,11 +163,11 @@ class AdminCog(commands.Cog):
         from src.discord_ui.embeds import build_board_embed
         from src.services.board_service import filter_events_for_board
 
-        session = _session()
-        cfg = get_or_create_config(session, interaction.guild_id)
-        tz = ZoneInfo(cfg.timezone)
-        events = filter_events_for_board(
-            get_active_events(session, interaction.guild_id), board_type, cfg, tz)
-        embed = build_board_embed(events, board_type.replace("_", " ").title(),
-                                  tz, cfg.include_tba_section)
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            tz = ZoneInfo(cfg.timezone)
+            events = filter_events_for_board(
+                get_active_events(session, interaction.guild_id), board_type, cfg, tz)
+            embed = build_board_embed(events, board_type.replace("_", " ").title(),
+                                      tz, cfg.include_tba_section)
         await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from src.scraping.hightide_parser import parse_product
 from src.services.event_service import upsert_products
 from src.db.repositories import get_active_events
 

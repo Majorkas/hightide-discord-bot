@@ -3,7 +3,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from src.db.repositories import (
-    get_active_events, mark_absent_events_stale, upsert_event,
+    mark_absent_events_stale, upsert_event,
 )
 from src.scraping.fetcher import fetch_events
 from src.scraping.hightide_parser import parse_product

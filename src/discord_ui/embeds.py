@@ -1,9 +1,38 @@
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 
 import discord
 
 from src.db.models import Event
+
+# Discord embed limits
+MAX_EMBED_FIELDS = 25
+MAX_FIELD_VALUE_CHARS = 1024
+MAX_EMBED_CHARS = 6000
+
+
+def _truncate_lines(lines: list[str], max_chars: int) -> tuple[list[str], int]:
+    """Truncate lines to fit within max_chars, return (truncated_lines, dropped_count)."""
+    result = []
+    current_len = 0
+    dropped = 0
+    for line in lines:
+        if current_len + len(line) + 1 <= max_chars - 10:  # reserve 10 chars for "… +N more"
+            result.append(line)
+            current_len += len(line) + 1
+        else:
+            dropped += 1
+    return result, dropped
+
+
+def _count_embed_chars(embed: discord.Embed) -> int:
+    """Count total characters in embed (title, description, fields, footer)."""
+    count = len(embed.title or "")
+    count += len(embed.description or "")
+    for field in embed.fields:
+        count += len(field.name) + len(field.value)
+    count += len(embed.footer.text or "")
+    return count
 
 
 def build_board_embed(events: list[Event], title: str, tz,
@@ -12,7 +41,7 @@ def build_board_embed(events: list[Event], title: str, tz,
     dated = [e for e in events if e.starts_at is not None]
     tba = [e for e in events if e.starts_at is None]
 
-    by_day: dict[datetime.date, list[Event]] = defaultdict(list)
+    by_day: dict[date, list[Event]] = defaultdict(list)
     for e in dated:
         local = e.starts_at.astimezone(tz)
         by_day[local.date()].append(e)
@@ -20,19 +49,63 @@ def build_board_embed(events: list[Event], title: str, tz,
     if not dated and not (include_tba and tba):
         embed.description = "No events found for this period."
 
-    for day in sorted(by_day):
+    days = sorted(by_day)
+    later_lines = []
+
+    for i, day in enumerate(days):
+        # Cap at 24 day-fields to reserve 1 for TBA or "Later"
+        if len(embed.fields) >= 24:
+            for e in sorted(by_day[day], key=lambda x: x.starts_at):
+                local = e.starts_at.astimezone(tz)
+                time_part = local.strftime("%H:%M") if e.time_known else "time TBC"
+                price_part = f" · {e.price_text}" if e.price_text else ""
+                later_lines.append(f"`{time_part}` [{e.title}]({e.url}){price_part}")
+            continue
+
         lines = []
         for e in sorted(by_day[day], key=lambda x: x.starts_at):
             local = e.starts_at.astimezone(tz)
             time_part = local.strftime("%H:%M") if e.time_known else "time TBC"
             price_part = f" · {e.price_text}" if e.price_text else ""
             lines.append(f"`{time_part}` [{e.title}]({e.url}){price_part}")
-        embed.add_field(name=day.strftime("%a %d %b %Y"),
-                        value="\n".join(lines), inline=False)
 
+        # Truncate per-field to 1024 chars
+        truncated, dropped = _truncate_lines(lines, MAX_FIELD_VALUE_CHARS)
+        value_text = "\n".join(truncated)
+        if dropped > 0:
+            value_text += f"\n… +{dropped} more"
+        embed.add_field(name=day.strftime("%a %d %b %Y"), value=value_text, inline=False)
+
+    # Handle "Later" field if there are overflow days
+    if later_lines:
+        truncated, dropped = _truncate_lines(later_lines, MAX_FIELD_VALUE_CHARS)
+        value_text = "\n".join(truncated)
+        if dropped > 0:
+            value_text += f"\n… +{dropped} more"
+        embed.add_field(name="Later", value=value_text, inline=False)
+
+    # Add TBA section (but may be truncated if total exceeds 6000)
+    tba_field_added = False
     if include_tba and tba:
-        lines = [f"[{e.title}]({e.url})" for e in tba]
-        embed.add_field(name="Date TBA", value="\n".join(lines), inline=False)
+        tba_lines = [f"[{e.title}]({e.url})" for e in tba]
+        embed.add_field(name="Date TBA", value="\n".join(tba_lines), inline=False)
+        tba_field_added = True
+
+    # Enforce 6000 char limit: drop/truncate fields from end
+    while _count_embed_chars(embed) > MAX_EMBED_CHARS:
+        if not embed.fields:
+            break
+        
+        last_field = embed.fields[-1]
+        # If TBA is last and still too large, replace it with ellipsis and break
+        if tba_field_added and last_field.name == "Date TBA":
+            embed.fields[-1].value = f"… and {len(tba)} undated events"
+            tba_field_added = False  # Don't try to modify it again
+            if _count_embed_chars(embed) <= MAX_EMBED_CHARS:
+                break
+        
+        # Remove field and continue
+        embed.fields.pop()
 
     embed.set_footer(text=f"Last updated {datetime.now(tz).strftime('%H:%M')} AWST")
     return embed
