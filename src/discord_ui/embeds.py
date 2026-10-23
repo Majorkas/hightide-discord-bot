@@ -52,8 +52,11 @@ def build_board_embed(events: list[Event], title: str, tz,
     days = sorted(by_day)
     later_lines = []
 
-    # Always cap day-fields at 24, reserving the 25th field for "Later" or TBA
-    max_day_fields = MAX_EMBED_FIELDS - 1
+    # Dynamically compute day-field cap to respect total 25-field limit
+    # If TBA will render, reserve 1 slot: cap day-fields at 23, Later at 1, TBA at 1 = 25
+    # Otherwise, cap day-fields at 24, Later at 1 = 25
+    will_render_tba = include_tba and len(tba) > 0
+    max_day_fields = 23 if will_render_tba else 24
 
     for i, day in enumerate(days):
         # Cap at max_day_fields to reserve space for "Later" and/or TBA

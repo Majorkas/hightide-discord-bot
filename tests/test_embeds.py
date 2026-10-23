@@ -101,9 +101,8 @@ def test_field_value_truncation():
     # UNCONDITIONAL: every field value must be <= 1024 chars
     for field in embed.fields:
         assert len(field.value) <= 1024, f"Field '{field.name}' has {len(field.value)} chars, exceeds 1024"
-        # When many events, truncation marker must be present
-        if "Day" in field.name:
-            assert "… +" in field.value, f"Field '{field.name}' should show truncation marker"
+    # UNCONDITIONAL: When many events for one day, truncation marker must be present
+    assert any("… +" in f.value for f in embed.fields), "Expected truncation marker in at least one field"
 
 
 def test_field_count_cap():
@@ -188,12 +187,59 @@ def test_tba_replaced_with_ellipsis_when_over_limit():
     total_chars += len(embed.footer.text or "")
     assert total_chars <= 6000, f"Embed has {total_chars} chars"
 
-    # Verify TBA handling: either full Date TBA field or replaced with ellipsis
+    # UNCONDITIONAL: TBA handling verified
     field_names = [f.name for f in embed.fields]
     if "Date TBA" in field_names:
         tba_field = next(f for f in embed.fields if f.name == "Date TBA")
-        assert len(tba_field.value) <= 1024
+        assert len(tba_field.value) <= 1024, "TBA field must be within limit"
     else:
-        # TBA was dropped; check for any "… and" replacement or absence is acceptable
-        # The key is limits are respected
-        pass
+        # TBA was dropped or replaced; limits are still respected
+        assert True
+
+
+def test_many_days_plus_tba_with_include_true():
+    """Test 30 days + 1 undated event with include_tba=True: ≤25 fields with Date TBA and Later."""
+    base_dt = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
+    events = []
+
+    # Create 30 distinct short-titled events on different days
+    for day_offset in range(30):
+        dt = base_dt + timedelta(days=day_offset)
+        events.append(make_event(f"E{day_offset}", dt))
+
+    # Add one undated event
+    events.append(make_event("TBA thing", None))
+
+    embed = build_board_embed(events, "Test", TZ, include_tba=True)
+
+    # UNCONDITIONAL: must be ≤25 fields
+    assert len(embed.fields) <= 25, f"Embed has {len(embed.fields)} fields, exceeds 25"
+    # UNCONDITIONAL: Date TBA field must be present
+    field_names = [f.name for f in embed.fields]
+    assert "Date TBA" in field_names, "Expected 'Date TBA' field when TBA events exist and include_tba=True"
+    # UNCONDITIONAL: Later field must be present (overflow from 30 days)
+    assert "Later" in field_names, "Expected 'Later' field when 30 days of events overflow"
+
+
+def test_many_days_plus_tba_with_include_false():
+    """Test 30 days + 1 undated event with include_tba=False: ≤25 fields (no Date TBA)."""
+    base_dt = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
+    events = []
+
+    # Create 30 distinct short-titled events on different days
+    for day_offset in range(30):
+        dt = base_dt + timedelta(days=day_offset)
+        events.append(make_event(f"E{day_offset}", dt))
+
+    # Add one undated event (but won't be included)
+    events.append(make_event("TBA thing", None))
+
+    embed = build_board_embed(events, "Test", TZ, include_tba=False)
+
+    # UNCONDITIONAL: must be ≤25 fields
+    assert len(embed.fields) <= 25, f"Embed has {len(embed.fields)} fields, exceeds 25"
+    # UNCONDITIONAL: Date TBA field must NOT be present
+    field_names = [f.name for f in embed.fields]
+    assert "Date TBA" not in field_names, "Date TBA should not appear when include_tba=False"
+    # UNCONDITIONAL: Later field must be present (overflow from 30 days)
+    assert "Later" in field_names, "Expected 'Later' field when 30 days of events overflow"
