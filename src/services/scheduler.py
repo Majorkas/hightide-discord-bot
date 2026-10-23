@@ -96,7 +96,13 @@ class RefreshScheduler:
                         and (self._last_attempt is None
                              or now - self._last_attempt >= _RETRY_INTERVAL)):
                     self._last_attempt = now
-                    await run_daily_refresh(self.bot, cfg.guild_id)
-                    self._last_run_key = today
+                    result = await run_daily_refresh(self.bot, cfg.guild_id)
+                    # Only set _last_run_key if the run fully succeeded (no errors)
+                    has_error = any(
+                        isinstance(v, str) and v.startswith("error:")
+                        for v in result.values()
+                    )
+                    if not has_error:
+                        self._last_run_key = today
             except Exception:
                 log.exception("scheduler tick failed")

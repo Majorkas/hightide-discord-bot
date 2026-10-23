@@ -69,6 +69,11 @@ def render_board_hash(events: list[Event], board_type: str, cfg, tz) -> str:
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()
 
 
+def is_new_period(board_type: str, stored_key: str | None, current_key: str) -> bool:
+    """Check if the period has changed (e.g., month or week rollover)."""
+    return stored_key != current_key
+
+
 async def upsert_board(bot, session: Session, guild_id: int, board_type: str) -> str:
     async with _get_board_lock(guild_id, board_type):
         return await _upsert_board_locked(bot, session, guild_id, board_type)
@@ -101,6 +106,27 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
     if msg is not None:
         if post.render_hash == new_hash and post.period_key == key:
             return "skipped"
+        
+        # Rollover check: if this_month and period changed, recreate instead of edit
+        if board_type == "this_month" and is_new_period(board_type, post.period_key, key):
+            # Month rollover: send new message and optionally delete old one
+            msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            
+            # Delete previous month message if configured
+            if cfg.delete_previous_month_message:
+                try:
+                    old_channel = bot.get_channel(post.channel_id) or await bot.fetch_channel(post.channel_id)
+                    old_msg = await old_channel.fetch_message(post.message_id)
+                    # Apply authorship guard: only delete if bot sent it
+                    if old_msg.author.id == bot.user.id:
+                        await old_msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    log.debug("could not delete previous month message for %s", board_type)
+            
+            save_board_post(session, guild_id, board_type, key,
+                            channel.id, msg.id, new_hash)
+            return "recreated"
+        
         try:
             await msg.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except (discord.NotFound, discord.Forbidden):
@@ -109,6 +135,25 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
             save_board_post(session, guild_id, board_type, key,
                             channel.id, msg.id, new_hash)
             return "edited"
+
+    # msg is None: either no post exists, or fetch failed
+    # Check if this is a period rollover (even if we couldn't fetch the old message)
+    if post and board_type == "this_month" and is_new_period(board_type, post.period_key, key):
+        # Month rollover with unreachable/missing old message
+        msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        
+        # Try to delete old message if configured (best effort)
+        if cfg.delete_previous_month_message:
+            try:
+                old_channel = bot.get_channel(post.channel_id) or await bot.fetch_channel(post.channel_id)
+                old_msg = await old_channel.fetch_message(post.message_id)
+                if old_msg.author.id == bot.user.id:
+                    await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden):
+                log.debug("could not delete previous month message for %s", board_type)
+        
+        save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)
+        return "recreated"
 
     msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)

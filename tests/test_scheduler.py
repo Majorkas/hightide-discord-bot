@@ -150,7 +150,8 @@ async def test_tick_guild_id_none_skip(temp_db, monkeypatch):
 async def test_tick_runs_at_matching_time(temp_db, monkeypatch, clock):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
     _seed(temp_db, daily_refresh_time="09:00")
-    mock_refresh = AsyncMock()
+    # Mock run_daily_refresh to return a successful result (no errors)
+    mock_refresh = AsyncMock(return_value={"events": [], "this_week": "created", "this_month": "created"})
     monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
 
     inst = RefreshScheduler(_bot())
@@ -181,7 +182,8 @@ async def test_tick_runs_late_after_missed_minute(temp_db, monkeypatch, clock):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
     _seed(temp_db, daily_refresh_time="09:00")
     clock.now = datetime(2026, 10, 23, 11, 17, tzinfo=TZ)
-    mock_refresh = AsyncMock()
+    # Mock run_daily_refresh to return a successful result (no errors)
+    mock_refresh = AsyncMock(return_value={"events": [], "this_week": "created", "this_month": "created"})
     monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
 
     inst = RefreshScheduler(_bot())
@@ -194,7 +196,8 @@ async def test_tick_runs_late_after_missed_minute(temp_db, monkeypatch, clock):
 async def test_tick_same_day_guard_and_next_day(temp_db, monkeypatch, clock):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
     _seed(temp_db, daily_refresh_time="09:00")
-    mock_refresh = AsyncMock()
+    # Mock run_daily_refresh to return a successful result (no errors)
+    mock_refresh = AsyncMock(return_value={"events": [], "this_week": "created", "this_month": "created"})
     monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
 
     inst = RefreshScheduler(_bot())
@@ -241,3 +244,85 @@ async def test_tick_failure_swallowed_and_retried_after_window(temp_db, monkeypa
     clock.now += timedelta(hours=1)
     await inst.tick.coro(inst)
     assert mock_refresh.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_tick_partial_error_does_not_set_last_run_key(temp_db, monkeypatch, clock):
+    """
+    When run_daily_refresh returns a result with any error string (e.g., events="error:..."),
+    _last_run_key should NOT be set so retry happens after 30-minute window.
+    """
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    # Simulate fetch failure: events="error:ValueError"
+    error_result = {
+        "events": "error:ValueError",
+        "this_week": "created",
+        "this_month": "skipped",
+    }
+    mock_refresh = AsyncMock(return_value=error_result)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await inst.tick.coro(inst)
+
+    # Because result contains "error:ValueError", _last_run_key should not be set
+    assert inst._last_run_key is None
+    assert inst._last_attempt is not None
+
+    # Within 30-minute window: no retry
+    clock.now += timedelta(minutes=29)
+    await inst.tick.coro(inst)
+    assert mock_refresh.await_count == 1
+
+    # After 30-minute window: retry happens
+    clock.now += timedelta(minutes=1)
+    await inst.tick.coro(inst)
+    assert mock_refresh.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_tick_board_error_does_not_set_last_run_key(temp_db, monkeypatch, clock):
+    """
+    When run_daily_refresh returns a result with board error (e.g., this_month="error:..."),
+    _last_run_key should NOT be set so retry happens after 30-minute window.
+    """
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    # Simulate board upsert failure
+    error_result = {
+        "events": {"added": 2},
+        "this_week": "created",
+        "this_month": "error:RuntimeError",
+    }
+    mock_refresh = AsyncMock(return_value=error_result)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await inst.tick.coro(inst)
+
+    # Because result contains "error:RuntimeError", _last_run_key should not be set
+    assert inst._last_run_key is None
+
+
+@pytest.mark.asyncio
+async def test_tick_full_success_sets_last_run_key(temp_db, monkeypatch, clock):
+    """
+    When run_daily_refresh returns a result with no error strings,
+    _last_run_key SHOULD be set.
+    """
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    success_result = {
+        "events": {"added": 2, "updated": 1},
+        "this_week": "edited",
+        "this_month": "created",
+    }
+    mock_refresh = AsyncMock(return_value=success_result)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await inst.tick.coro(inst)
+
+    # All values are non-error, so _last_run_key should be set
+    assert inst._last_run_key == "2026-10-23"
