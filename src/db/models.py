@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, TypeDecorator, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -10,6 +10,38 @@ class Base(DeclarativeBase):
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class TZDateTime(TypeDecorator):
+    """Timezone-aware DateTime that ensures UTC storage and retrieval from SQLite."""
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def bind_processor(self, dialect):
+        def process_value(value):
+            if value is None:
+                return None
+            if not isinstance(value, datetime):
+                return value
+            if value.tzinfo is None:
+                raise ValueError(f"DateTime {value} must be timezone-aware")
+            # Convert to UTC
+            return value.astimezone(timezone.utc)
+        return process_value
+
+    def result_processor(self, dialect, coltype):
+        def process_value(value):
+            if value is None:
+                return None
+            # SQLite returns datetime strings; parse them
+            if isinstance(value, str):
+                # Parse ISO format string (e.g., "2026-10-23 14:30:00.000000")
+                value = datetime.fromisoformat(value)
+            if isinstance(value, datetime) and value.tzinfo is None:
+                # SQLite returns naive datetimes; attach UTC
+                return value.replace(tzinfo=timezone.utc)
+            return value
+        return process_value
 
 
 class GuildConfig(Base):
@@ -44,14 +76,14 @@ class Event(Base):
     source_url: Mapped[str | None] = mapped_column(String, nullable=True)
     title: Mapped[str] = mapped_column(String)
     url: Mapped[str] = mapped_column(String)
-    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    starts_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
     time_known: Mapped[bool] = mapped_column(Boolean, default=False)
     price_text: Mapped[str | None] = mapped_column(String, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_url: Mapped[str | None] = mapped_column(String, nullable=True)
     fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    first_seen_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
     missed_refreshes: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -66,4 +98,4 @@ class BoardPost(Base):
     channel_id: Mapped[int] = mapped_column(Integer)
     message_id: Mapped[int] = mapped_column(Integer)
     render_hash: Mapped[str] = mapped_column(String, default="")
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
