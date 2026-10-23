@@ -1,12 +1,14 @@
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
 import discord
 import pytest
 from sqlalchemy import select
 
 from src.bot import create_bot
-from src.db.models import Base, EventSource, GuildConfig
+from src.db.models import Base, Event, EventSource, GuildConfig
 from src.db.session import get_engine, get_session_factory
 from src.discord_ui import commands_admin
 from src.discord_ui.commands_admin import AdminCog
@@ -180,3 +182,27 @@ async def test_source_remove_wrong_guild(db, cog, interaction):
 async def test_source_remove_missing_id(db, cog, interaction):
     await cog.source_remove.callback(cog, interaction, 4242)
     assert "not found" in _reply(interaction)
+
+
+async def test_board_preview(db, cog, interaction):
+    tz = ZoneInfo("Australia/Perth")
+    with db() as s:
+        # Create config and active event
+        cfg = GuildConfig(guild_id=GUILD, timezone="Australia/Perth")
+        s.add(cfg)
+        event = Event(
+            guild_id=GUILD,
+            external_id="wp:test",
+            title="Test Event",
+            url="https://example.com",
+            starts_at=datetime.now(tz) + timedelta(days=1),
+            time_known=True,
+            is_active=True,
+        )
+        s.add(event)
+        s.commit()
+    await cog.board_preview.callback(cog, interaction, "this_week")
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "embed" in kwargs
+    assert isinstance(kwargs["embed"], discord.Embed)
