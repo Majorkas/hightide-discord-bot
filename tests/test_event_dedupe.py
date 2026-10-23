@@ -40,16 +40,27 @@ def test_junk_products_not_persisted(session, fixture_products, tz):
         j in t for t in titles for j in ("test", "placeholder", "painters guild"))
 
 
-def test_junk_products_are_seen_and_never_stale_deactivated(
+def test_preexisting_junk_rows_self_heal_via_stale_marking(
         session, fixture_products, tz):
     junk = next(p for p in fixture_products if p["slug"] == "product-placeholder")
     # A pre-existing active row for the junk id (e.g. from before the filter existed).
     session.add(Event(guild_id=1, external_id=f"wp:{junk['id']}", title="Product placeholder",
-                      url="u", fingerprint="x", is_active=True))
+                      url="u", fingerprint="x", is_active=True, missed_refreshes=0))
     session.commit()
-    stats = [upsert_products(session, 1, fixture_products, tz) for _ in range(3)]
-    assert all(s["deactivated"] == 0 for s in stats)
-    assert _row(session, f"wp:{junk['id']}").is_active is True
+    
+    # First run: junk is filtered but NOT marked seen, so it gets a miss
+    stats1 = upsert_products(session, 1, fixture_products, tz)
+    assert stats1["filtered"] == JUNK_COUNT
+    row1 = _row(session, f"wp:{junk['id']}")
+    assert row1.missed_refreshes == 1
+    assert row1.is_active is True
+    
+    # Second run: another miss triggers deactivation (2-miss threshold)
+    stats2 = upsert_products(session, 1, fixture_products, tz)
+    assert stats2["filtered"] == JUNK_COUNT
+    row2 = _row(session, f"wp:{junk['id']}")
+    assert row2.missed_refreshes == 2
+    assert row2.is_active is False
 
 
 def test_filtered_not_counted_in_created_or_updated(session, tz):

@@ -19,10 +19,8 @@ def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
         try:
             ev = parse_product_or_none(product, tz)
             if ev is None:
-                # Junk stays "seen" so stale-marking never touches it.
+                # Junk is not marked seen; pre-existing junk rows self-heal via stale-marking.
                 filtered += 1
-                if product.get("id") is not None:
-                    seen.add(f"wp:{product['id']}")
                 continue
             data = {
                 "external_id": ev.external_id,
