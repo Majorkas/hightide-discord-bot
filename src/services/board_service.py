@@ -84,8 +84,8 @@ async def upsert_board(bot, session: Session, guild_id: int, board_type: str) ->
         else:
             return "skipped"
 
-    # try to edit existing
-    if post:
+    # try to edit existing (only if channel hasn't changed)
+    if post and post.channel_id == channel.id:
         try:
             msg = await channel.fetch_message(post.message_id)
             await msg.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
