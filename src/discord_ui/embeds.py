@@ -52,9 +52,12 @@ def build_board_embed(events: list[Event], title: str, tz,
     days = sorted(by_day)
     later_lines = []
 
+    # Always cap day-fields at 24, reserving the 25th field for "Later" or TBA
+    max_day_fields = MAX_EMBED_FIELDS - 1
+
     for i, day in enumerate(days):
-        # Cap at 24 day-fields to reserve 1 for TBA or "Later"
-        if len(embed.fields) >= 24:
+        # Cap at max_day_fields to reserve space for "Later" and/or TBA
+        if len(embed.fields) >= max_day_fields:
             for e in sorted(by_day[day], key=lambda x: x.starts_at):
                 local = e.starts_at.astimezone(tz)
                 time_part = local.strftime("%H:%M") if e.time_known else "time TBC"
@@ -84,28 +87,39 @@ def build_board_embed(events: list[Event], title: str, tz,
             value_text += f"\n… +{dropped} more"
         embed.add_field(name="Later", value=value_text, inline=False)
 
-    # Add TBA section (but may be truncated if total exceeds 6000)
+    # Add TBA section (capped at 1024 chars)
     tba_field_added = False
     if include_tba and tba:
         tba_lines = [f"[{e.title}]({e.url})" for e in tba]
-        embed.add_field(name="Date TBA", value="\n".join(tba_lines), inline=False)
+        tba_value = "\n".join(tba_lines)
+        # Truncate TBA value to 1024 chars with indicator
+        if len(tba_value) > MAX_FIELD_VALUE_CHARS:
+            truncated, dropped = _truncate_lines(tba_lines, MAX_FIELD_VALUE_CHARS)
+            tba_value = "\n".join(truncated)
+            if dropped > 0:
+                tba_value += f"\n… +{dropped} more"
+        embed.add_field(name="Date TBA", value=tba_value, inline=False)
         tba_field_added = True
+
+    # Set footer before enforcing 6000 char limit (so footer is included in count)
+    embed.set_footer(text=f"Last updated {datetime.now(tz).strftime('%H:%M')} AWST")
 
     # Enforce 6000 char limit: drop/truncate fields from end
     while _count_embed_chars(embed) > MAX_EMBED_CHARS:
         if not embed.fields:
             break
-        
+
         last_field = embed.fields[-1]
         # If TBA is last and still too large, replace it with ellipsis and break
         if tba_field_added and last_field.name == "Date TBA":
-            embed.fields[-1].value = f"… and {len(tba)} undated events"
+            embed.set_field_at(len(embed.fields) - 1, name="Date TBA",
+                               value=f"… and {len(tba)} undated events", inline=False)
             tba_field_added = False  # Don't try to modify it again
             if _count_embed_chars(embed) <= MAX_EMBED_CHARS:
                 break
-        
-        # Remove field and continue
-        embed.fields.pop()
 
-    embed.set_footer(text=f"Last updated {datetime.now(tz).strftime('%H:%M')} AWST")
+        # Remove field from end using remove_field (which mutates internal state)
+        embed.remove_field(len(embed.fields) - 1)
+
     return embed
+
