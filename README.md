@@ -48,7 +48,7 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
    ```
 
 4. **Initialize the database**:
-   The database is automatically created and seeded on first run.
+   The database is automatically created on first run.
 
 ## Environment Variables
 
@@ -90,7 +90,7 @@ python -m pytest tests/test_board_service.py -v
 
 Run a single test:
 ```bash
-python -m pytest tests/test_normalize.py::test_parse_dd_mm_yy -v
+python -m pytest tests/test_normalize.py::test_parse_dot_prefix_two_digit_year -v
 ```
 
 ## Commands
@@ -116,13 +116,15 @@ All admin commands require the **Manage Guild** permission.
 - Controls whether a "Date TBA" section appears on boards for events without known dates.
 
 **`/source add url:<URL>`**
-- Adds an event source URL. Default source is the Hightide Events category.
+- Adds an event source URL to the sources table for future use.
 
 **`/source list`**
 - Lists all configured event sources and their IDs.
 
 **`/source remove <id>`**
 - Removes an event source by ID.
+
+*Note: v1 fetches the built-in Hightide Events category only; custom sources are not yet consumed.*
 
 **`/board preview <this_week|this_month>`**
 - Shows a preview of the board for the chosen period (ephemeral, admin only).
@@ -137,7 +139,7 @@ All admin commands require the **Manage Guild** permission.
 
 **`/events upcoming`**
 - Shows events happening in the next 7 days in an ephemeral message.
-- No permissions required beyond View Channels.
+- No permissions required beyond View Channels and Embed Links.
 
 ## Discord Permissions
 
@@ -153,7 +155,7 @@ Add the bot to your server with the following permissions:
 
 **Invite URL template**:
 ```
-https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=117824&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=93184&scope=bot%20applications.commands
 ```
 
 (Adjust the `permissions` parameter if you enable additional features.)
@@ -165,7 +167,7 @@ Run the bot on your machine or a local server. The SQLite database is stored loc
 
 ### Cloud Deployment (Railway / Render)
 
-1. **Set up a persistent volume** for the SQLite database (or use a managed database).
+1. **Set up a persistent volume** for the SQLite database (or use a managed database like PostgreSQL, which requires installing a driver such as psycopg; PostgreSQL support is untested).
 
 2. **Set environment variables** in your deployment platform:
    - `DISCORD_TOKEN` — your bot token
@@ -215,14 +217,13 @@ tests/                       # pytest suite with fixtures
 
 - **Testing**: `pytest` with asyncio and SQLite in-memory databases for isolation
 - **Code style**: Format with standard Python conventions
-- **Logging**: Structured logging via Python's `logging` module
+- **Logging**: Logging via Python's `logging` module
 
 ## Troubleshooting
 
 **Bot doesn't respond to commands:**
 - Verify the bot has **View Channels** and **Embed Links** permissions in the server.
 - Check that your `DISCORD_TOKEN` is valid.
-- Use `/config` to verify channels are set.
 
 **Events not updating:**
 - Run `/board refresh` to trigger an immediate fetch.
