@@ -32,4 +32,6 @@ Working memory for the build. Plan: `docs/superpowers/plans/2026-10-23-discord-e
 
 - [x] Task 11: `/events upcoming` user command + full test pass (incl. deferred setup_hook startup smoke test)
 - [x] Task 12: README + .env.example + roadmap polish
-- [ ] 4-agent council + final whole-branch review
+- [x] 4-agent council + final whole-branch review + fix wave (289 tests green, 0 warnings)
+
+**Status: COMPLETE — merge-ready.** 12/12 tasks, 5 milestone councils, final whole-branch review passed.
