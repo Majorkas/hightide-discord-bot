@@ -65,7 +65,7 @@ def test_command_surface():
         "daily_refresh_time", "include_tba",
     }
     assert {c.name for c in groups["source"].commands} == {"list", "add", "remove"}
-    assert {c.name for c in groups["board"].commands} == set()
+    assert {c.name for c in groups["board"].commands} == {"preview"}
     for g in groups.values():
         assert g.default_permissions == discord.Permissions(manage_guild=True)
         assert g.guild_only is True
