@@ -17,6 +17,13 @@ _ROLL_FORWARD_DAYS = 30
 _JUNK_TITLE_TERMS = ("test", "placeholder", "painters guild")
 _TIME_RE = re.compile(r"→\s*Time:\s*(.+?)\s*(?:<|$)", re.IGNORECASE)
 _TICKET_RE = re.compile(r"→\s*Ticket:\s*(.+?)\s*(?:<|$)", re.IGNORECASE)
+_RANGE_RE = re.compile(r"^(.+?)\s+(?:to|[-–—])\s+(.+)$", re.IGNORECASE)
+_PROSE_CLOCK = r"(\d{1,2}(?::\d{2}\s*(?:[ap]\.?m\b\.?)?|\s*[ap]\.?m\b\.?))(?![\d/:])"
+_PROSE_START_RE = re.compile(
+    r"\b(?:kick(?:s|ing)?\s+off|start(?:s|ing)?)\s+at\s+" + _PROSE_CLOCK
+    + r"|\bfrom\s+" + _PROSE_CLOCK,
+    re.IGNORECASE,
+)
 
 
 def clean_title(raw: str) -> str:
@@ -68,6 +75,16 @@ def parse_event_datetime(
 def extract_time(content_html: str) -> str | None:
     m = _TIME_RE.search(content_html)
     return m.group(1).strip() if m else None
+
+
+def split_time_range(time_str: str) -> tuple[str, str] | None:
+    m = _RANGE_RE.match(time_str.strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+def extract_prose_start_time(content_html: str) -> str | None:
+    m = _PROSE_START_RE.search(strip_html(content_html))
+    return (m.group(1) or m.group(2)) if m else None
 
 
 def extract_price(content_html: str) -> str | None:

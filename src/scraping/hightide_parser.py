@@ -6,8 +6,9 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
 from src.scraping.normalize import (
-    _DOT_PREFIX, _NATURAL_DATE, clean_title, extract_price, extract_time,
-    fingerprint, is_junk_title, parse_event_datetime,
+    _DOT_PREFIX, _NATURAL_DATE, clean_title, extract_price,
+    extract_prose_start_time, extract_time, fingerprint, is_junk_title,
+    parse_event_datetime, split_time_range,
 )
 
 MAX_TITLE_CHARS = 200
@@ -92,6 +93,33 @@ def _parse_clock(s: str) -> time | None:
         return None
 
 
+_PM_MARKER = re.compile(r"(?<![a-z])p\.?m\.?\b", re.IGNORECASE)
+_AMPM_MARKER = re.compile(r"(?<![a-z])[ap]\.?m\.?\b", re.IGNORECASE)
+
+
+def _parse_single(s: str) -> time | None:
+    t = _parse_clock(s)
+    if t is None and s.lower().startswith("from "):
+        t = _parse_clock(s[5:])
+    return t
+
+
+def _parse_start_time(time_str: str) -> time | None:
+    parts = split_time_range(time_str)
+    if parts is None:
+        return _parse_single(time_str)
+    start_str, end_str = parts
+    start = _parse_single(start_str)
+    if start is None:
+        return None
+    # "6:30 to 10:00 PM": a bare start inherits the end's PM when that keeps it before the end.
+    if not _AMPM_MARKER.search(start_str) and _PM_MARKER.search(end_str) and start.hour < 12:
+        end = _parse_clock(end_str)
+        if end is not None and (start.hour + 12, start.minute) <= (end.hour, end.minute):
+            start = start.replace(hour=start.hour + 12)
+    return start
+
+
 def parse_product(product: dict, tz) -> NormalizedEvent:
     full_title = clean_title(product["title"]["rendered"])
     content = product.get("content", {}).get("rendered", "")
@@ -100,10 +128,11 @@ def parse_product(product: dict, tz) -> NormalizedEvent:
 
     time_known = False
     time_str = extract_time(content)
-    if starts_at is not None and time_str:
-        t = _parse_clock(time_str)
-        if t is None and time_str.lower().startswith("from "):
-            t = _parse_clock(time_str[5:])
+    if starts_at is not None:
+        t = _parse_start_time(time_str) if time_str else None
+        if time_str is None:
+            prose = extract_prose_start_time(content)
+            t = _parse_clock(prose) if prose else None
         if t is not None:
             starts_at = starts_at.replace(hour=t.hour, minute=t.minute, second=0)
             time_known = True

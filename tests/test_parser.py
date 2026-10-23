@@ -75,16 +75,105 @@ def test_time_overlay_from_prefix(tz):
     assert ev.time_known is True
 
 
-def test_time_overlay_range_leaves_time_unknown(tz):
-    """Time overlay should NOT extract start time from ranges."""
+def test_time_overlay_range_uses_start_time(tz):
     ev = parse_product(_product(
         "12.01.27 – Test Event",
         "<p>Test event</p><p>→ Time: 6:30 to 10:00 PM</p>"), tz)
     assert ev.starts_at is not None
     assert (ev.starts_at.year, ev.starts_at.month, ev.starts_at.day) == (2027, 1, 12)
-    assert ev.starts_at.hour == 0
-    assert ev.starts_at.minute == 0
+    assert (ev.starts_at.hour, ev.starts_at.minute) == (18, 30)
+    assert ev.time_known is True
+
+
+@pytest.mark.parametrize("time_text,expected", [
+    ("09:00am to 06:30pm", (9, 0)),
+    ("09:00am to 06:00pm", (9, 0)),
+    ("08:00am to 06:30pm", (8, 0)),
+    ("10:00am to 5:30PM", (10, 0)),
+    ("08:30am to 07:00PM", (8, 30)),
+    ("6:30 to 10:00 PM", (18, 30)),
+    ("9:30PM to 6:00PM", (21, 30)),
+    ("9:00 AM - 5:00 PM", (9, 0)),
+    ("7pm – 11pm", (19, 0)),
+    ("From 6:30 to 10:00 PM", (18, 30)),
+    ("11:00 to 2:00 PM", (11, 0)),
+])
+def test_range_time_extracts_start(tz, time_text, expected):
+    ev = parse_product(_product(
+        "12.01.27 – Test Event", f"<p>Intro</p><p>→ Time: {time_text}</p>"), tz)
+    assert ev.time_known is True
+    assert (ev.starts_at.hour, ev.starts_at.minute) == expected
+
+
+@pytest.mark.parametrize("time_text", ["10 - 6", "10 to 6", "10 to late", "soon to later"])
+def test_bare_number_range_rejected(tz, time_text):
+    ev = parse_product(_product(
+        "12.01.27 – Test Event", f"<p>Intro</p><p>→ Time: {time_text}</p>"), tz)
     assert ev.time_known is False
+    assert (ev.starts_at.hour, ev.starts_at.minute) == (0, 0)
+
+
+@pytest.mark.parametrize("prose,expected", [
+    ("We'll kick off at 2pm and finish at 9pm.", (14, 0)),
+    ("Kicks off at 6:30 PM sharp.", (18, 30)),
+    ("Kicking off at 11am.", (11, 0)),
+    ("Play starts at 7pm.", (19, 0)),
+    ("Event starting at 10:15am.", (10, 15)),
+    ("Doors open from 5:30pm to 10pm.", (17, 30)),
+    ("FROM 8PM until late", (20, 0)),
+])
+def test_prose_start_time_fallback(tz, prose, expected):
+    ev = parse_product(_product("12.01.27 – Test Event", f"<p>{prose}</p>"), tz)
+    assert ev.time_known is True
+    assert (ev.starts_at.hour, ev.starts_at.minute) == expected
+
+
+@pytest.mark.parametrize("prose", [
+    "We finish at 9pm.",
+    "Ends at 10:00pm.",
+    "Finish at 9/10pm.",
+    "Starts at noon.",
+    "Come from 10 to 6.",
+    "Kick off at 9/10pm.",
+    "Nothing about times here.",
+])
+def test_prose_without_start_time_stays_tbc(tz, prose):
+    ev = parse_product(_product("12.01.27 – Test Event", f"<p>{prose}</p>"), tz)
+    assert ev.time_known is False
+    assert (ev.starts_at.hour, ev.starts_at.minute) == (0, 0)
+
+
+def test_time_line_takes_precedence_over_prose(tz):
+    ev = parse_product(_product(
+        "12.01.27 – Test Event",
+        "<p>We kick off at 2pm.</p><p>→ Time: 6:30pm</p>"), tz)
+    assert (ev.starts_at.hour, ev.starts_at.minute) == (18, 30)
+
+
+def test_prose_ignored_when_title_has_no_date(tz):
+    ev = parse_product(_product("Mystery Night", "<p>Kick off at 2pm.</p>"), tz)
+    assert ev.starts_at is None and ev.time_known is False
+
+
+BOARD_TO_DEATH_HTML = (
+    "<p>BOARD TO DEATH</p>\n<p>Four gaming tribes. One spooky day of gaming.</p>\n"
+    "<p>Join MDD, Tabletop Titans, Bastardcon, and Hightide at 3 Josephson St "
+    "Fremantle this Halloween for a cursed day of board games, seances, and "
+    "maniacal laughter.</p>\n"
+    "<p>You&#39;re welcome to dress up as a vampire, zombie, accountant, or "
+    "anything else.</p>\n"
+    "<p>We&#39;ll kick off at 2pm and finish at 9/10pm, but feel free to come and "
+    "chill in Hightide earlier if you really can&#39;t get a grip on your "
+    "cardboard addiction.</p>\n<p>We hope to see you soon.</p>\n<p></p>\n"
+)
+
+
+def test_board_to_death_live_shape_kicks_off_at_two_pm(tz):
+    ev = parse_product(_product(
+        "Board to Death &#8211; October 31st 2026", BOARD_TO_DEATH_HTML), tz)
+    assert (ev.starts_at.year, ev.starts_at.month, ev.starts_at.day) == (2026, 10, 31)
+    assert (ev.starts_at.hour, ev.starts_at.minute) == (14, 0)
+    assert ev.time_known is True
 
 
 def test_all_fixture_products_parse_without_error(fixture_products, tz):
@@ -122,7 +211,9 @@ def test_yearless_warhammer_fixture_parses_date(by_slug, tz, monkeypatch):
     ev = parse_product(by_slug("warhammer-40000-the-damnos-incident"), tz)
     assert ev.starts_at is not None
     assert (ev.starts_at.year, ev.starts_at.month, ev.starts_at.day) == (2026, 11, 7)
-    assert ev.time_known is False
+    # Fixture has "→ Time: 08:00am to 06:30pm" → range start.
+    assert ev.time_known is True
+    assert (ev.starts_at.hour, ev.starts_at.minute) == (8, 0)
 
 
 def test_undated_title_falls_back_to_tba(tz):
