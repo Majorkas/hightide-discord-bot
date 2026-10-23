@@ -88,6 +88,8 @@ class BoardPost(Base):
     board_type: Mapped[str] = mapped_column(String)  # this_week | this_month
     period_key: Mapped[str] = mapped_column(String)  # e.g. 2026-W43 | 2026-10
     channel_id: Mapped[int] = mapped_column(BigInteger)
-    message_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)  # header message for this_week
+    # JSON list of the card message ids that follow the header (this_week only).
+    message_ids: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     render_hash: Mapped[str] = mapped_column(String, default="")
     updated_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)

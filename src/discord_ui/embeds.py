@@ -143,67 +143,65 @@ def build_board_embed(events: list[Event], title: str, tz,
 
 
 MAX_EVENT_CARDS = 7
-MAX_MESSAGE_EMBEDS = 10
 _COLOR = 0x1F8B4C
-_COMPACT_RESERVE = 800  # chars kept free per compact embed when sizing cards
+MAX_SUMMARY_CHARS = 1000
+MAX_TITLE_CHARS = 256
+_COMPACT_BUDGET = 3500  # each board message is its own Discord message (6000-char cap)
 
 
-def _card_description(e: Event, tz, summary_cap: int | None) -> str:
+def _card_description(e: Event, tz) -> str:
     local = e.starts_at.astimezone(tz)
     time_part = local.strftime("%H:%M") if e.time_known else "time TBC"
     info = f"{local.strftime('%a %d %b')} · {time_part}"
     if e.price_text:
         info += f" · {_md_escape(e.price_text)}"
     summary = e.summary or ""
-    if summary_cap is not None and len(summary) > summary_cap:
-        summary = summary[:summary_cap].rstrip() + "…" if summary_cap else ""
+    if len(summary) > MAX_SUMMARY_CHARS:
+        summary = summary[:MAX_SUMMARY_CHARS].rstrip() + "…"
     return f"{info}\n{_md_escape(summary)}" if summary else info
 
 
-def _event_card(e: Event, tz, summary_cap: int | None) -> discord.Embed:
-    card = discord.Embed(title=e.title, url=_safe_url(e.url),
-                         description=_card_description(e, tz, summary_cap), color=_COLOR)
+def build_event_card(e: Event, tz) -> discord.Embed:
+    """Rich card for one dated event (images only render on single-embed messages)."""
+    card = discord.Embed(title=e.title[:MAX_TITLE_CHARS], url=_safe_url(e.url),
+                         description=_card_description(e, tz), color=_COLOR)
     image = _safe_url(e.image_url)
     if image:
         card.set_image(url=image)
     return card
 
 
-def _compact_embed(title: str, lines: list[str], max_chars: int) -> discord.Embed:
-    budget = max(0, min(4096, max_chars - len(title)))
-    text, _ = _truncate_lines(lines, budget)
+def _compact_embed(title: str, lines: list[str]) -> discord.Embed:
+    text, _ = _truncate_lines(lines, _COMPACT_BUDGET)
     return discord.Embed(title=title, description=text, color=_COLOR)
 
 
-def build_rich_board_embeds(events: list[Event], title: str, tz,
-                            include_tba: bool) -> list[discord.Embed]:
-    """One card per dated event (max 7), then 'Also this week' overflow and 'Date TBA'."""
+def build_week_board_items(events: list[Event], title: str, tz,
+                           include_tba: bool) -> list[tuple[str, discord.Embed]]:
+    """(key, embed) per board message: header, up to 7 event cards, overflow, TBA.
+
+    Event cards are keyed by external_id so the board can be diffed message by message.
+    """
     dated = sorted((e for e in events if e.starts_at is not None),
                    key=lambda e: (e.starts_at, e.title))
     tba = sorted((e for e in events if e.starts_at is None), key=lambda e: e.title)
     show_tba = include_tba and bool(tba)
-    footer = f"Last updated {datetime.now(tz).strftime('%H:%M')} AWST"
 
-    if not dated and not show_tba:
-        empty = discord.Embed(title=title, description="No events found for this period.",
-                              color=_COLOR)
-        empty.set_footer(text=footer)
-        return [empty]
+    header = discord.Embed(title=title, color=_COLOR)
+    if dated:
+        skim = [f"{e.starts_at.astimezone(tz).strftime('%a %d')} — {_link(e.title, e.url)}"
+                for e in dated]
+        header.description, _ = _truncate_lines(skim, _COMPACT_BUDGET)
+    elif show_tba:
+        header.description = "No dated events this period."
+    else:
+        header.description = "No events found for this period."
+    header.set_footer(text=f"Last updated {datetime.now(tz).strftime('%H:%M')} AWST")
+    items: list[tuple[str, discord.Embed]] = [("header", header)]
 
-    card_events, overflow = dated[:MAX_EVENT_CARDS], dated[MAX_EVENT_CARDS:]
-    compact_count = bool(overflow) + show_tba
+    items.extend((e.external_id, build_event_card(e, tz)) for e in dated[:MAX_EVENT_CARDS])
 
-    # The 6000-char cap spans the whole message: shrink summaries until cards fit.
-    fixed = len(title) + len(footer)
-    cards: list[discord.Embed] = []
-    for cap in (None, 140, 60, 0):
-        cards = [_event_card(e, tz, cap) for e in card_events]
-        used = fixed + sum(_count_embed_chars(c) for c in cards)
-        if used + _COMPACT_RESERVE * compact_count <= MAX_EMBED_CHARS:
-            break
-    embeds = cards
-    used = fixed + sum(_count_embed_chars(c) for c in cards)
-
+    overflow = dated[MAX_EVENT_CARDS:]
     if overflow:
         by_day: dict[date, list[Event]] = defaultdict(list)
         for e in overflow:
@@ -212,17 +210,14 @@ def build_rich_board_embeds(events: list[Event], title: str, tz,
         for day in sorted(by_day):
             lines.append(f"**{day.strftime('%a %d %b %Y')}**")
             lines.extend(_event_line(e, tz) for e in by_day[day])
-        budget = MAX_EMBED_CHARS - used - (_COMPACT_RESERVE if show_tba else 0)
-        embed = _compact_embed("Also this week", lines, budget)
-        used += _count_embed_chars(embed)
-        embeds.append(embed)
+        items.append(("overflow", _compact_embed("Also this week", lines)))
 
     if show_tba:
-        embeds.append(_compact_embed("Date TBA", [_link(e.title, e.url) for e in tba],
-                                     MAX_EMBED_CHARS - used))
+        items.append(("tba", _compact_embed("Date TBA", [_link(e.title, e.url) for e in tba])))
+    return items
 
-    assert len(embeds) <= MAX_MESSAGE_EMBEDS
-    if cards:
-        embeds[0].set_author(name=title)
-    embeds[0].set_footer(text=footer)
-    return embeds
+
+def build_week_board_payload(events: list[Event], title: str, tz,
+                             include_tba: bool) -> list[discord.Embed]:
+    """Header embed first, then one embed per card/overflow/TBA message (at most 10)."""
+    return [embed for _, embed in build_week_board_items(events, title, tz, include_tba)]

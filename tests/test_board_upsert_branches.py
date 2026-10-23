@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 from zoneinfo import ZoneInfo
@@ -56,7 +57,8 @@ def _seed(session, **cfg_kw):
 async def test_edit_branch_notfound_race_recreates(session):
     _seed(session)
     channel = _channel()
-    channel.send = AsyncMock(side_effect=[_message(555), _message(666)])
+    channel.send = AsyncMock(side_effect=[_message(555), _message(556), _message(666),
+                                          _message(667), _message(668)])
     bot = _bot(channel)
     assert await upsert_board(bot, session, GUILD, "this_week") == "created"
 
@@ -68,8 +70,7 @@ async def test_edit_branch_notfound_race_recreates(session):
     channel.fetch_message = AsyncMock(side_effect=_http_exc(discord.NotFound, 404))
 
     assert await upsert_board(bot, session, GUILD, "this_week") == "created"
-    assert channel.send.await_count == 2
-    assert channel.fetch_message.await_count == 1
+    assert channel.send.await_count == 5  # 2 initial + header and two cards recreated
     assert get_board_post(session, GUILD, "this_week").message_id == 666
 
 
@@ -77,7 +78,8 @@ async def test_edit_raising_notfound_recreates(session):
     _seed(session)
     channel = _channel()
     first, edited = _message(555), _message(555)
-    channel.send = AsyncMock(side_effect=[first, _message(777)])
+    channel.send = AsyncMock(side_effect=[first, _message(556), _message(777), _message(778),
+                                          _message(779)])
     channel.fetch_message = AsyncMock(return_value=edited)
     bot = _bot(channel)
     await upsert_board(bot, session, GUILD, "this_week")
@@ -95,7 +97,7 @@ async def test_edit_raising_notfound_recreates(session):
 async def test_forbidden_on_fetch_propagates_without_recreate(session):
     _seed(session)
     channel = _channel()
-    channel.send = AsyncMock(side_effect=[_message(555), _message(666)])
+    channel.send = AsyncMock(side_effect=[_message(555), _message(556)])
     bot = _bot(channel)
     await upsert_board(bot, session, GUILD, "this_week")
 
@@ -103,14 +105,14 @@ async def test_forbidden_on_fetch_propagates_without_recreate(session):
     channel.fetch_message = AsyncMock(side_effect=_http_exc(discord.Forbidden, 403))
     with pytest.raises(discord.Forbidden):
         await upsert_board(bot, session, GUILD, "this_week")
-    assert channel.send.await_count == 1
+    assert channel.send.await_count == 2
     assert get_board_post(session, GUILD, "this_week").message_id == 555
 
 
 async def test_forbidden_on_fetch_in_edit_path_propagates(session):
     _seed(session)
     channel = _channel()
-    channel.send = AsyncMock(side_effect=[_message(555), _message(666)])
+    channel.send = AsyncMock(side_effect=[_message(555), _message(556)])
     bot = _bot(channel)
     await upsert_board(bot, session, GUILD, "this_week")
 
@@ -122,14 +124,14 @@ async def test_forbidden_on_fetch_in_edit_path_propagates(session):
 
     with pytest.raises(discord.Forbidden):
         await upsert_board(bot, session, GUILD, "this_week")
-    assert channel.send.await_count == 1
+    assert channel.send.await_count == 2
 
 
 async def test_forbidden_on_edit_propagates_without_recreate(session):
     _seed(session)
     channel = _channel()
     first, fetched = _message(555), _message(555)
-    channel.send = AsyncMock(side_effect=[first, _message(777)])
+    channel.send = AsyncMock(side_effect=[first, _message(556), _message(777)])
     channel.fetch_message = AsyncMock(return_value=fetched)
     bot = _bot(channel)
     await upsert_board(bot, session, GUILD, "this_week")
@@ -142,7 +144,7 @@ async def test_forbidden_on_edit_propagates_without_recreate(session):
 
     with pytest.raises(discord.Forbidden):
         await upsert_board(bot, session, GUILD, "this_week")
-    assert channel.send.await_count == 1
+    assert channel.send.await_count == 2
 
 
 async def test_new_post_save_failure_deletes_sent_message(session, monkeypatch):
@@ -156,7 +158,7 @@ async def test_new_post_save_failure_deletes_sent_message(session, monkeypatch):
 
     with pytest.raises(RuntimeError, match="db down"):
         await upsert_board(bot, session, GUILD, "this_week")
-    sent.delete.assert_awaited_once()
+    assert sent.delete.await_count == 2  # header + one card, both unsaved
 
 
 async def test_new_post_save_failure_cleanup_failure_still_reraises_original(session, monkeypatch):
@@ -171,7 +173,7 @@ async def test_new_post_save_failure_cleanup_failure_still_reraises_original(ses
 
     with pytest.raises(RuntimeError, match="db down"):
         await upsert_board(bot, session, GUILD, "this_week")
-    sent.delete.assert_awaited_once()
+    assert sent.delete.await_count == 2
 
 
 async def test_delete_board_not_found(session):
@@ -183,7 +185,7 @@ async def test_delete_board_not_found(session):
 async def test_delete_board_deletes_message_and_row_under_lock(session):
     _seed(session)
     channel = _channel()
-    channel.send = AsyncMock(return_value=_message(555))
+    channel.send = AsyncMock(side_effect=[_message(555), _message(556)])
     bot = _bot(channel)
     bot.user.id = 42
     await upsert_board(bot, session, GUILD, "this_week")
@@ -199,8 +201,8 @@ async def test_delete_board_deletes_message_and_row_under_lock(session):
     channel.fetch_message = AsyncMock(side_effect=fetch_message)
 
     assert await delete_board(bot, session, GUILD, "this_week") == "deleted"
-    assert lock_states == [True]
-    old.delete.assert_awaited_once()
+    assert lock_states == [True, True]  # header + one card
+    assert old.delete.await_count == 2
     assert get_board_post(session, GUILD, "this_week") is None
     assert not _get_board_lock(GUILD, "this_week").locked()
 
@@ -229,7 +231,7 @@ async def test_get_channel_none_falls_back_to_fetch_channel(session):
 
     assert await upsert_board(bot, session, GUILD, "this_week") == "created"
     bot.fetch_channel.assert_awaited_once_with(111)
-    channel.send.assert_awaited_once()
+    assert channel.send.await_count == 2
 
 
 async def test_this_month_board_created(session):
@@ -247,18 +249,17 @@ async def test_this_month_board_created(session):
 async def test_board_post_persisted_after_create(session):
     _seed(session)
     channel = _channel()
-    channel.send = AsyncMock(return_value=_message(555))
+    channel.send = AsyncMock(side_effect=[_message(555), _message(556)])
     bot = _bot(channel)
 
     await upsert_board(bot, session, GUILD, "this_week")
 
     post = get_board_post(session, GUILD, "this_week")
-    cfg = session.get(GuildConfig, GUILD)
-    events = [e for e in session.query(Event).all()]
     assert post.channel_id == 111
     assert post.message_id == 555
+    assert json.loads(post.message_ids) == [556]
     assert post.period_key == period_key("this_week", TZ)
-    assert post.render_hash == render_board_hash(events, "this_week", cfg, TZ)
+    assert json.loads(post.render_hash)["keys"] == ["header", "wp:e1"]
 
 
 async def test_concurrent_upserts_serialised_by_lock(session):
@@ -280,34 +281,37 @@ async def test_concurrent_upserts_serialised_by_lock(session):
     )
 
     assert sorted(results) == ["created", "skipped"]
-    assert channel.send.await_count == 1
+    assert channel.send.await_count == 2
 
 
-async def test_this_week_send_uses_embeds_list(session):
+async def test_this_week_send_uses_single_embed_per_message(session):
     _seed(session)
     channel = _channel()
     channel.send = AsyncMock(return_value=_message(555))
     assert await upsert_board(_bot(channel), session, GUILD, "this_week") == "created"
-    kwargs = channel.send.call_args.kwargs
-    assert "embed" not in kwargs
-    assert isinstance(kwargs["embeds"], list) and kwargs["embeds"][0].title == "e1"
-    assert kwargs["allowed_mentions"].everyone is False
+    header, card = [c.kwargs for c in channel.send.call_args_list]
+    for kwargs in (header, card):
+        assert "embeds" not in kwargs
+        assert kwargs["allowed_mentions"].everyone is False
+    assert header["embed"].title == "This Week at Hightide"
+    assert card["embed"].title == "e1"
 
 
-async def test_this_week_edit_uses_embeds_list(session):
+async def test_this_week_edit_targets_changed_card_only(session):
     _seed(session)
     channel = _channel()
-    channel.send = AsyncMock(return_value=_message(555))
+    channel.send = AsyncMock(side_effect=[_message(555), _message(556)])
     await upsert_board(_bot(channel), session, GUILD, "this_week")
-    existing = _message(555)
-    channel.fetch_message = AsyncMock(return_value=existing)
+    card_msg = _message(556)
+    channel.fetch_message = AsyncMock(return_value=card_msg)
     ev = session.query(Event).one()
     ev.summary = "changed summary"
     session.commit()
     assert await upsert_board(_bot(channel), session, GUILD, "this_week") == "edited"
-    kwargs = existing.edit.call_args.kwargs
-    assert "embed" not in kwargs
-    assert "changed summary" in kwargs["embeds"][0].description
+    channel.fetch_message.assert_any_await(556)
+    kwargs = card_msg.edit.call_args.kwargs
+    assert "embeds" not in kwargs
+    assert "changed summary" in kwargs["embed"].description
     assert kwargs["allowed_mentions"].roles is False
 
 

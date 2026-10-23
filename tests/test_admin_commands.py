@@ -212,7 +212,29 @@ async def test_board_preview(db, cog, interaction):
     assert kwargs["ephemeral"] is True
     assert isinstance(kwargs["embeds"], list) and kwargs["embeds"]
     assert all(isinstance(e, discord.Embed) for e in kwargs["embeds"])
-    assert kwargs["embeds"][0].title == "Test Event"
+    assert kwargs["embeds"][0].title == "This Week"
+    assert kwargs["embeds"][1].title == "Test Event"
+
+
+async def test_board_preview_this_week_splits_oversized_payload(db, cog, interaction):
+    tz = ZoneInfo("Australia/Perth")
+    with db() as s:
+        s.add(GuildConfig(guild_id=GUILD, timezone="Australia/Perth"))
+        for i in range(7):
+            s.add(Event(guild_id=GUILD, external_id=f"wp:{i}", title=f"E{i}",
+                        url="https://example.com", summary="x" * 900,
+                        starts_at=datetime.now(tz) + timedelta(hours=i + 1),
+                        time_known=True, is_active=True))
+        s.commit()
+    interaction.followup.send = AsyncMock()
+    await cog.board_preview.callback(cog, interaction, "this_week")
+    _, first = interaction.response.send_message.call_args
+    _, more = interaction.followup.send.call_args
+    sent = first["embeds"] + more["embeds"]
+    assert len(sent) == 8
+    assert sum(len(e) for e in first["embeds"]) <= 6000
+    assert sum(len(e) for e in more["embeds"]) <= 6000
+    assert more["ephemeral"] is True
 
 
 async def test_board_preview_this_month_single_embed(db, cog, interaction):

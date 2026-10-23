@@ -67,7 +67,7 @@ def get_board_post(session: Session, guild_id: int, board_type: str) -> BoardPos
 
 
 def save_board_post(session, guild_id, board_type, period_key, channel_id,
-                    message_id, render_hash) -> BoardPost:
+                    message_id, render_hash, message_ids: str = "[]") -> BoardPost:
     post = get_board_post(session, guild_id, board_type)
     if post is None:
         post = BoardPost(guild_id=guild_id, board_type=board_type)
@@ -75,6 +75,7 @@ def save_board_post(session, guild_id, board_type, period_key, channel_id,
     post.period_key = period_key
     post.channel_id = channel_id
     post.message_id = message_id
+    post.message_ids = message_ids
     post.render_hash = render_hash
     post.updated_at = datetime.now(timezone.utc)
     session.commit()

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 from src.db.models import BoardPost
@@ -136,6 +137,14 @@ def test_save_board_post_create_then_update(session):
     assert got.render_hash == "h2"
     assert got.updated_at.tzinfo is not None
     assert got.updated_at <= datetime.now(timezone.utc)
+
+
+def test_save_board_post_message_ids_default_and_round_trip(session):
+    p = save_board_post(session, 7, "this_month", "2026-10", 1, 100, "h")
+    assert p.message_ids == "[]"
+    save_board_post(session, 7, "this_week", "2026-W43", 1, 100, "{}", message_ids="[101, 102]")
+    session.expire_all()
+    assert json.loads(get_board_post(session, 7, "this_week").message_ids) == [101, 102]
 
 
 def test_week_and_month_posts_coexist(session):

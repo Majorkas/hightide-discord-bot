@@ -37,6 +37,20 @@ def _valid_source_url(url: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def _chunk_embeds(embeds: list[discord.Embed]) -> list[list[discord.Embed]]:
+    """Split into messages within Discord's 10-embed / 6000-char limits."""
+    chunks: list[list[discord.Embed]] = [[]]
+    total = 0
+    for embed in embeds:
+        size = len(embed)
+        if chunks[-1] and (len(chunks[-1]) >= 10 or total + size > 6000):
+            chunks.append([])
+            total = 0
+        chunks[-1].append(embed)
+        total += size
+    return chunks
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -160,9 +174,10 @@ class AdminCog(commands.Cog):
                             board_type: str) -> None:
         from zoneinfo import ZoneInfo
         from src.db.repositories import get_active_events, get_or_create_config
-        from src.discord_ui.embeds import build_board_embed, build_rich_board_embeds
+        from src.discord_ui.embeds import build_board_embed, build_week_board_payload
         from src.services.board_service import filter_events_for_board
 
+        followups: list[list[discord.Embed]] = []
         try:
             with _session() as session:
                 cfg = get_or_create_config(session, interaction.guild_id)
@@ -171,8 +186,9 @@ class AdminCog(commands.Cog):
                     get_active_events(session, interaction.guild_id), board_type, cfg, tz)
                 preview_title = board_type.replace("_", " ").title()
                 if board_type == "this_week":
-                    send_kwargs = {"embeds": build_rich_board_embeds(
-                        events, preview_title, tz, cfg.include_tba_section)}
+                    chunks = _chunk_embeds(build_week_board_payload(
+                        events, preview_title, tz, cfg.include_tba_section))
+                    send_kwargs, followups = {"embeds": chunks[0]}, chunks[1:]
                 else:
                     send_kwargs = {"embed": build_board_embed(
                         events, preview_title, tz, cfg.include_tba_section)}
@@ -183,6 +199,8 @@ class AdminCog(commands.Cog):
                 f"Preview failed: {type(e).__name__}", ephemeral=True)
             return
         await interaction.response.send_message(**send_kwargs, ephemeral=True)
+        for chunk in followups:
+            await interaction.followup.send(embeds=chunk, ephemeral=True)
 
     @board_group.command(name="refresh")
     async def board_refresh(self, interaction: discord.Interaction) -> None:

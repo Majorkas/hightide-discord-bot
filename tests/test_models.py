@@ -105,6 +105,19 @@ def test_board_post_guild_board_type_unique(session):
     session.rollback()
 
 
+def test_board_post_message_ids_defaults_to_empty_list_and_round_trips(session):
+    session.add(BoardPost(guild_id=1, board_type="this_week", period_key="k",
+                          channel_id=1, message_id=1))
+    session.add(BoardPost(guild_id=1, board_type="this_month", period_key="k",
+                          channel_id=1, message_id=1, message_ids="[5, 6]"))
+    session.commit()
+    session.expire_all()
+    import json
+    assert session.query(BoardPost).filter_by(board_type="this_week").one().message_ids == "[]"
+    got = session.query(BoardPost).filter_by(board_type="this_month").one()
+    assert json.loads(got.message_ids) == [5, 6]
+
+
 def test_snowflake_guild_id_round_trip(session):
     gid = 1234567890123456789
     session.add(GuildConfig(guild_id=gid, this_week_channel_id=gid + 1))

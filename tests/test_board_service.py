@@ -182,12 +182,12 @@ async def test_upsert_board_fresh_creates(session):
 
     result = await upsert_board(bot, session, 999, "this_week")
     assert result == "created"
-    channel.send.assert_called_once()
-    call_args = channel.send.call_args
-    assert isinstance(call_args.kwargs["allowed_mentions"], discord.AllowedMentions)
-    assert call_args.kwargs["allowed_mentions"].everyone is False
-    assert call_args.kwargs["allowed_mentions"].users is False
-    assert call_args.kwargs["allowed_mentions"].roles is False
+    assert channel.send.await_count == 2  # header + one event card
+    for call_args in channel.send.call_args_list:
+        assert isinstance(call_args.kwargs["allowed_mentions"], discord.AllowedMentions)
+        assert call_args.kwargs["allowed_mentions"].everyone is False
+        assert call_args.kwargs["allowed_mentions"].users is False
+        assert call_args.kwargs["allowed_mentions"].roles is False
 
 
 @pytest.mark.asyncio
@@ -219,7 +219,7 @@ async def test_upsert_board_identical_skipped(session):
     assert result2 == "skipped"
     channel.fetch_message.assert_called_with(555)
     msg.edit.assert_not_awaited()
-    assert channel.send.await_count == 1
+    assert channel.send.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -255,7 +255,7 @@ async def test_upsert_board_deleted_message_recreated(session):
 
     result2 = await upsert_board(bot, session, 999, "this_week")
     assert result2 == "created"
-    channel.send.assert_called_once()
+    assert channel.send.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -347,4 +347,4 @@ async def test_upsert_board_channel_moved(session):
     result2 = await upsert_board(bot, session, 999, "this_week")
     # Should create in new channel (not skip/edit, because stored post.channel_id differs from new channel.id)
     assert result2 == "created"
-    channel_new.send.assert_called_once()
+    assert channel_new.send.await_count == 2

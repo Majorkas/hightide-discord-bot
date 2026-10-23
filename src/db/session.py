@@ -1,9 +1,27 @@
-from sqlalchemy import create_engine
+import logging
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
+
+log = logging.getLogger("hightide.db")
 
 
 def get_engine(url: str):
     return create_engine(url, future=True)
+
+
+def ensure_board_post_message_ids(engine) -> None:
+    """Add board_posts.message_ids to pre-existing DBs (no migration framework in v1)."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE board_posts ADD COLUMN message_ids TEXT NOT NULL DEFAULT '[]'"))
+    except OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+        return
+    log.info("added board_posts.message_ids column")
 
 
 def get_session_factory(url: str) -> sessionmaker:

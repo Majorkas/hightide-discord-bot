@@ -9,7 +9,7 @@ from discord.ext import commands  # noqa: E402
 
 from src import config  # noqa: E402
 from src.db.models import Base  # noqa: E402
-from src.db.session import get_engine  # noqa: E402
+from src.db.session import ensure_board_post_message_ids, get_engine  # noqa: E402
 
 log = logging.getLogger("hightide")
 
@@ -37,6 +37,7 @@ def create_bot() -> commands.Bot:
     async def setup_hook() -> None:
         engine = get_engine(config.DATABASE_URL)
         Base.metadata.create_all(engine)
+        ensure_board_post_message_ids(engine)
         from src.services.scheduler import RefreshScheduler
         RefreshScheduler(bot).start()
         if config.GUILD_ID:

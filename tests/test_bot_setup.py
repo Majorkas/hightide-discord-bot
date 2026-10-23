@@ -2,11 +2,12 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from src import config
 from src.bot import create_bot
-from src.db.session import get_engine
+from src.db.models import Base
+from src.db.session import ensure_board_post_message_ids, get_engine
 from src.services import scheduler
 
 
@@ -59,6 +60,56 @@ async def test_setup_hook_syncs_to_guild_when_set(env, monkeypatch):
     guild = kwargs["guild"]
     assert isinstance(guild, discord.Object) and guild.id == 4242
     assert copied == [{"guild": guild}]
+
+
+_LEGACY_DDL = (
+    "CREATE TABLE board_posts (id INTEGER PRIMARY KEY, guild_id BIGINT, board_type VARCHAR, "
+    "period_key VARCHAR, channel_id BIGINT, message_id BIGINT, render_hash VARCHAR, "
+    "updated_at DATETIME, UNIQUE (guild_id, board_type))"
+)
+
+
+def _legacy_db(url):
+    engine = get_engine(url)
+    with engine.begin() as conn:
+        conn.execute(text(_LEGACY_DDL))
+        conn.execute(text("INSERT INTO board_posts (guild_id, board_type, period_key, channel_id, "
+                          "message_id, render_hash) VALUES (1, 'this_week', 'k', 2, 3, 'h')"))
+    return engine
+
+
+def test_ensure_message_ids_column_idempotent_on_legacy_table(tmp_path):
+    engine = _legacy_db(f"sqlite:///{tmp_path / 'legacy.db'}")
+    try:
+        ensure_board_post_message_ids(engine)
+        ensure_board_post_message_ids(engine)  # duplicate column is tolerated
+        assert "message_ids" in {c["name"] for c in inspect(engine).get_columns("board_posts")}
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT message_ids FROM board_posts")).scalar_one() == "[]"
+    finally:
+        engine.dispose()
+
+
+def test_ensure_message_ids_column_noop_on_fresh_schema(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
+    try:
+        Base.metadata.create_all(engine)
+        ensure_board_post_message_ids(engine)
+        ensure_board_post_message_ids(engine)
+    finally:
+        engine.dispose()
+
+
+async def test_setup_hook_upgrades_legacy_board_posts_table(env, monkeypatch):
+    monkeypatch.setattr(config, "GUILD_ID", None)
+    bot, url, _ = env
+    _legacy_db(url).dispose()
+    await bot.setup_hook()
+    engine = get_engine(url)
+    try:
+        assert "message_ids" in {c["name"] for c in inspect(engine).get_columns("board_posts")}
+    finally:
+        engine.dispose()
 
 
 def test_main_without_token_exits_before_running(monkeypatch):

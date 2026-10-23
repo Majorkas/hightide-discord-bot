@@ -338,12 +338,12 @@ async def test_this_week_period_change_does_not_trigger_rollover(session):
 
     # Should NOT recreate, should use edit path
     assert result2 == "edited"
-    assert week_channel.send.await_count == 1  # only the initial creation
+    assert week_channel.send.await_count == 2  # initial header + card only
     msg.edit.assert_awaited_once()
     session.expire_all()
     post2 = get_board_post(session, GUILD, "this_week")
     assert post2.period_key == "2026-W43"
-    assert post2.message_id == 300
+    assert post2.message_id == 400  # header id is kept, not taken from the fetched message
 
 
 async def test_month_rollover_skips_delete_for_foreign_author(session):
