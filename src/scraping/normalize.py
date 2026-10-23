@@ -31,7 +31,10 @@ def parse_event_datetime(title: str, tz) -> tuple[datetime | None, bool]:
         day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if year < 100:
             year += 2000
-        return datetime(year, month, day, tzinfo=tz), False
+        try:
+            return datetime(year, month, day, tzinfo=tz), False
+        except (ValueError, OverflowError):
+            return None, False
     m = _NATURAL_DATE.search(title)
     if m:
         try:

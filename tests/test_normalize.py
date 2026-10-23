@@ -34,6 +34,16 @@ def test_parse_no_date_returns_none():
     assert dt is None and known is False
 
 
+def test_parse_dot_prefix_invalid_date_feb_31():
+    dt, known = parse_event_datetime("31.02.26 – Fake Event", TZ)
+    assert dt is None and known is False
+
+
+def test_parse_dot_prefix_invalid_date_month_99():
+    dt, known = parse_event_datetime("99.99.26 – Fake", TZ)
+    assert dt is None and known is False
+
+
 def test_extract_time():
     html = '<p>→ Location: Hightide</p><p>→ Time: 6:30pm</p><p>→ Ticket: $10</p>'
     assert extract_time(html) == "6:30pm"
