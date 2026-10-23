@@ -20,6 +20,12 @@ def _clear_board_locks():
     scheduler._refresh_locks.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_weekly_seeding(monkeypatch):
+    # Keep board tests independent of the default recurring roster; weekly tests opt back in.
+    monkeypatch.setattr(board_service, "seed_weekly_recurring", lambda session, guild_id: 0)
+
+
 @pytest.fixture
 def session():
     engine = get_engine("sqlite:///:memory:")

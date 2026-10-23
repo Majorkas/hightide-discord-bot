@@ -46,6 +46,21 @@ class GuildConfig(Base):
     week_start_mode: Mapped[str] = mapped_column(String, default="monday")
     include_tba_section: Mapped[bool] = mapped_column(Boolean, default=True)
     delete_previous_month_message: Mapped[bool] = mapped_column(Boolean, default=True)
+    weekly_image_url: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class WeeklyRecurring(Base):
+    __tablename__ = "weekly_recurring"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str] = mapped_column(String)
+    days_text: Mapped[str] = mapped_column(String)  # display text, e.g. "Mon & Thu"
+    time_text: Mapped[str] = mapped_column(String)  # display text, e.g. "6:00 PM"
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # ISO date (YYYY-MM-DD); the row stops showing once this date has passed.
+    ends_on: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class EventSource(Base):

@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import discord
 
-from src.db.models import Event
+from src.db.models import Event, WeeklyRecurring
 
 # Discord embed limits
 MAX_EMBED_FIELDS = 25
@@ -176,9 +176,48 @@ def _compact_embed(title: str, lines: list[str]) -> discord.Embed:
     return discord.Embed(title=title, description=text, color=_COLOR)
 
 
+def _parse_iso_date(value: str | None) -> date | None:
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def _weekly_line(row: WeeklyRecurring) -> str:
+    line = f"{_md_escape(row.days_text)} · {_md_escape(row.time_text)} — {_md_escape(row.title)}"
+    ends = _parse_iso_date(row.ends_on)
+    return f"{line} (until {ends.strftime('%b %d')})" if ends else line
+
+
+def current_weekly_rows(rows, tz, now: datetime | None = None) -> list[WeeklyRecurring]:
+    """Enabled rows whose ends_on (if any) hasn't passed in the guild timezone, in display order."""
+    today = (now or datetime.now(tz)).astimezone(tz).date()
+    keep = []
+    for r in rows:
+        ends = _parse_iso_date(r.ends_on)
+        if r.enabled and (ends is None or ends >= today):
+            keep.append(r)
+    return sorted(keep, key=lambda r: (r.sort_order or 0, r.id or 0))
+
+
+def build_weekly_embed(rows, image_url: str | None, tz) -> discord.Embed:
+    subtitle = "Recurring door-ticket-only events"
+    lines = [_weekly_line(r) for r in rows]
+    description = subtitle
+    if lines:
+        text, _ = _truncate_lines(lines, _COMPACT_BUDGET - len(subtitle) - 1)
+        description = f"{subtitle}\n{text}"
+    embed = discord.Embed(title="Every week at Hightide", description=description, color=_COLOR)
+    image = _safe_url(image_url)
+    if image:
+        embed.set_image(url=image)
+    return embed
+
+
 def build_week_board_items(events: list[Event], title: str, tz,
-                           include_tba: bool) -> list[tuple[str, discord.Embed]]:
-    """(key, embed) per board message: header, up to 7 event cards, overflow, TBA.
+                           include_tba: bool, weekly_rows=None, weekly_image_url: str | None = None,
+                           now: datetime | None = None) -> list[tuple[str, discord.Embed]]:
+    """(key, embed) per board message: header, up to 7 event cards, overflow, weekly, TBA.
 
     Event cards are keyed by external_id so the board can be diffed message by message.
     """
@@ -211,6 +250,10 @@ def build_week_board_items(events: list[Event], title: str, tz,
             lines.append(f"**{day.strftime('%a %d %b %Y')}**")
             lines.extend(_event_line(e, tz) for e in by_day[day])
         items.append(("overflow", _compact_embed("Also this week", lines)))
+
+    current = current_weekly_rows(weekly_rows or [], tz, now)
+    if current or _safe_url(weekly_image_url):
+        items.append(("weekly", build_weekly_embed(current, weekly_image_url, tz)))
 
     if show_tba:
         items.append(("tba", _compact_embed("Date TBA", [_link(e.title, e.url) for e in tba])))

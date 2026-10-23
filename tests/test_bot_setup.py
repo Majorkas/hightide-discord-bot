@@ -7,7 +7,9 @@ from sqlalchemy import inspect, text
 from src import config
 from src.bot import create_bot
 from src.db.models import Base
-from src.db.session import ensure_board_post_message_ids, get_engine
+from src.db.session import (
+    ensure_board_post_message_ids, ensure_guild_config_weekly_image_url, get_engine,
+)
 from src.services import scheduler
 
 
@@ -108,6 +110,46 @@ async def test_setup_hook_upgrades_legacy_board_posts_table(env, monkeypatch):
     engine = get_engine(url)
     try:
         assert "message_ids" in {c["name"] for c in inspect(engine).get_columns("board_posts")}
+    finally:
+        engine.dispose()
+
+
+_LEGACY_GUILD_CONFIG_DDL = (
+    "CREATE TABLE guild_config (guild_id BIGINT PRIMARY KEY, timezone VARCHAR, "
+    "this_week_channel_id BIGINT, this_month_channel_id BIGINT, daily_refresh_time VARCHAR, "
+    "week_start_mode VARCHAR, include_tba_section BOOLEAN, delete_previous_month_message BOOLEAN)"
+)
+
+
+async def test_setup_hook_ddl_twice_adds_weekly_schema_idempotently(env, monkeypatch):
+    monkeypatch.setattr(config, "GUILD_ID", None)
+    bot, url, _ = env
+    engine = get_engine(url)
+    with engine.begin() as conn:
+        conn.execute(text(_LEGACY_GUILD_CONFIG_DDL))
+        conn.execute(text("INSERT INTO guild_config (guild_id) VALUES (7)"))
+    engine.dispose()
+
+    await bot.setup_hook()
+    await bot.setup_hook()  # second run is a no-op
+
+    engine = get_engine(url)
+    try:
+        insp = inspect(engine)
+        assert "weekly_image_url" in {c["name"] for c in insp.get_columns("guild_config")}
+        assert "weekly_recurring" in insp.get_table_names()
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT weekly_image_url FROM guild_config")).scalar_one() is None
+    finally:
+        engine.dispose()
+
+
+def test_ensure_weekly_image_url_noop_on_fresh_schema(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path / 'fresh2.db'}")
+    try:
+        Base.metadata.create_all(engine)
+        ensure_guild_config_weekly_image_url(engine)
+        ensure_guild_config_weekly_image_url(engine)
     finally:
         engine.dispose()
 

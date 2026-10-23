@@ -9,6 +9,7 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
   - `#this-week` — the current week (Mon–Sun), starting from today
   - `#this-month` — current calendar month view (auto-rotates at month boundaries)
 - **Smart event management**: Deduplication by fingerprint, stale-event detection, automatic TBA fallback for missing dates
+- **Recurring weekly events**: A "Every week at Hightide" section on the this-week board lists door-ticket-only recurring events (with optional end dates and an image), managed via `/config weekly_*`
 - **User commands**: `/events upcoming` shows all events from today onward, plus date-TBA events, in an ephemeral message
 - **Admin control**: Configure channels, timezone, refresh time, and event sources per server
 
@@ -118,6 +119,20 @@ All admin commands require the **Manage Guild** permission.
 
 **`/config include_tba <true|false>`**
 - Controls whether a "Date TBA" section appears on boards for events without known dates.
+
+**`/config weekly_list`**
+- Lists recurring weekly events (including disabled ones) with their IDs.
+
+**`/config weekly_add <title> <days> <time>`**
+- Adds a recurring weekly event (title ≤200 chars, days/time ≤40), e.g. `Mon & Thu` / `6:00 PM`.
+
+**`/config weekly_remove <row_id>`**
+- Removes a recurring weekly event by ID.
+
+**`/config weekly_image <url>`**
+- Sets the http(s) image shown on the weekly section.
+
+*Weekly changes show on the next refresh, or run `/board refresh` to apply them now.*
 
 **`/source add url:<URL>`**
 - Adds an event source URL to the sources table for future use.

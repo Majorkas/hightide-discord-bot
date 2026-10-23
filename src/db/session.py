@@ -24,5 +24,17 @@ def ensure_board_post_message_ids(engine) -> None:
     log.info("added board_posts.message_ids column")
 
 
+def ensure_guild_config_weekly_image_url(engine) -> None:
+    """Add guild_config.weekly_image_url to pre-existing DBs."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE guild_config ADD COLUMN weekly_image_url VARCHAR"))
+    except OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+        return
+    log.info("added guild_config.weekly_image_url column")
+
+
 def get_session_factory(url: str) -> sessionmaker:
     return sessionmaker(bind=get_engine(url), expire_on_commit=False, future=True)

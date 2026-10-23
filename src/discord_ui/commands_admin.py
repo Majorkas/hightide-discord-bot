@@ -5,16 +5,21 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import discord
 from discord import app_commands
 from discord.ext import commands
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from src import config
-from src.db.models import EventSource
+from src.db.models import EventSource, WeeklyRecurring
 from src.db.repositories import get_or_create_config
 from src.db.session import get_session_factory
+from src.services.weekly_service import get_weekly_rows, seed_weekly_recurring
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _MAX_URL_LEN = 500
+_MAX_WEEKLY_TITLE_LEN = 200
+_MAX_WEEKLY_TEXT_LEN = 40
+_MAX_MESSAGE_CHARS = 1900
+_WEEKLY_REFRESH_NOTE = "Shows on next refresh, or run /board refresh now."
 
 # Created lazily; tests can monkeypatch or reset to None.
 _session_factory = None
@@ -127,6 +132,81 @@ class AdminCog(commands.Cog):
             session.commit()
         await interaction.response.send_message(
             f"include_tba_section = {value}", ephemeral=True)
+
+    @config_group.command(name="weekly_list")
+    async def weekly_list(self, interaction: discord.Interaction) -> None:
+        from src.discord_ui.embeds import _md_escape
+        with _session() as session:
+            seed_weekly_recurring(session, interaction.guild_id)
+            rows = get_weekly_rows(session, interaction.guild_id)
+            lines = []
+            for n, r in enumerate(rows, 1):
+                flags = ("" if r.enabled else " (disabled)") + (
+                    f" (until {r.ends_on})" if r.ends_on else "")
+                lines.append(f"{n}. `{r.id}` {_md_escape(r.days_text)} · {_md_escape(r.time_text)}"
+                             f" — {_md_escape(r.title)}{flags}")
+        text = "\n".join(lines)
+        if len(text) > _MAX_MESSAGE_CHARS:
+            text = text[:_MAX_MESSAGE_CHARS - 1] + "…"
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @config_group.command(name="weekly_add")
+    async def weekly_add(self, interaction: discord.Interaction,
+                         title: str, days: str, time: str) -> None:
+        from src.discord_ui.embeds import _md_escape
+        title, days, time = title.strip(), days.strip(), time.strip()
+        if not (title and days and time):
+            await interaction.response.send_message(
+                "Title, days and time must not be empty.", ephemeral=True)
+            return
+        if len(title) > _MAX_WEEKLY_TITLE_LEN or len(days) > _MAX_WEEKLY_TEXT_LEN \
+                or len(time) > _MAX_WEEKLY_TEXT_LEN:
+            await interaction.response.send_message(
+                f"Too long: title max {_MAX_WEEKLY_TITLE_LEN}, days/time max "
+                f"{_MAX_WEEKLY_TEXT_LEN} characters.", ephemeral=True)
+            return
+        with _session() as session:
+            # Seed first so adding to an untouched guild doesn't suppress the default roster.
+            seed_weekly_recurring(session, interaction.guild_id)
+            top = session.execute(select(func.max(WeeklyRecurring.sort_order)).where(
+                WeeklyRecurring.guild_id == interaction.guild_id)).scalar()
+            row = WeeklyRecurring(guild_id=interaction.guild_id, title=title, days_text=days,
+                                  time_text=time, sort_order=(top + 1) if top is not None else 0,
+                                  enabled=True)
+            session.add(row)
+            session.commit()
+            row_id = row.id
+        await interaction.response.send_message(
+            f"Added weekly event `{row_id}`: {_md_escape(days)} · {_md_escape(time)} — "
+            f"{_md_escape(title)}. {_WEEKLY_REFRESH_NOTE}", ephemeral=True)
+
+    @config_group.command(name="weekly_remove")
+    async def weekly_remove(self, interaction: discord.Interaction, row_id: int) -> None:
+        with _session() as session:
+            row = session.get(WeeklyRecurring, row_id)
+            removed = bool(row and row.guild_id == interaction.guild_id)
+            if removed:
+                session.delete(row)
+                session.commit()
+        if removed:
+            await interaction.response.send_message(
+                f"Removed weekly event {row_id}. {_WEEKLY_REFRESH_NOTE}", ephemeral=True)
+        else:
+            await interaction.response.send_message("Weekly event not found.", ephemeral=True)
+
+    @config_group.command(name="weekly_image")
+    async def weekly_image(self, interaction: discord.Interaction, url: str) -> None:
+        if not _valid_source_url(url):
+            await interaction.response.send_message(
+                f"Invalid URL. Use an http(s) URL up to {_MAX_URL_LEN} characters.",
+                ephemeral=True)
+            return
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            cfg.weekly_image_url = url
+            session.commit()
+        await interaction.response.send_message(
+            f"Weekly image set. {_WEEKLY_REFRESH_NOTE}", ephemeral=True)
 
     @source_group.command(name="list")
     async def source_list(self, interaction: discord.Interaction) -> None:

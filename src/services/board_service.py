@@ -12,6 +12,7 @@ from src.db.repositories import (
     get_active_events, get_board_post, get_or_create_config, save_board_post,
 )
 from src.discord_ui.embeds import build_board_embed, build_week_board_items
+from src.services.weekly_service import get_weekly_rows, seed_weekly_recurring
 
 log = logging.getLogger("hightide.board")
 
@@ -236,6 +237,12 @@ def _embed_hash(embed: discord.Embed) -> str:
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
+def _weekly_hash(embed: discord.Embed) -> str:
+    # Description holds the rendered lines; the image URL is included so image changes re-edit.
+    parts = [embed.description or "", embed.image.url or ""]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
 def _stored_week_set(post) -> tuple[dict[str, tuple[int, str | None]], list[int]]:
     """Map key -> (message_id, hash) for the stored set, plus unmappable extra ids."""
     ids = [post.message_id, *_loads_ids(post.message_ids)]
@@ -291,10 +298,14 @@ def _should_recreate_week_set(stored_keys: list[str], desired_keys: list[str]) -
 
 async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events: list[Event],
                            period: str, channel, post) -> str:
-    items = build_week_board_items(events, "This Week at Hightide", tz, cfg.include_tba_section)
+    seed_weekly_recurring(session, guild_id)
+    items = build_week_board_items(events, "This Week at Hightide", tz, cfg.include_tba_section,
+                                   weekly_rows=get_weekly_rows(session, guild_id),
+                                   weekly_image_url=cfg.weekly_image_url)
     by_id = {e.external_id: e for e in events}
     keys = [k for k, _ in items]
-    hashes = {k: _card_hash(by_id[k], tz) if k in by_id else _embed_hash(embed)
+    hashes = {k: _card_hash(by_id[k], tz) if k in by_id
+              else _weekly_hash(embed) if k == "weekly" else _embed_hash(embed)
               for k, embed in items}
     no_mentions = discord.AllowedMentions.none()
 
