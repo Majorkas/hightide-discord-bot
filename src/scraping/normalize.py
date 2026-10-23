@@ -10,9 +10,11 @@ _DOT_PREFIX = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})\b")
 _NATURAL_DATE = re.compile(
     r"((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
     r"(January|February|March|April|May|June|July|August|September|October|"
-    r"November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}",
+    r"November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?",
     re.IGNORECASE,
 )
+_ROLL_FORWARD_DAYS = 30
+_JUNK_TITLE_TERMS = ("test", "placeholder", "painters guild")
 _TIME_RE = re.compile(r"→\s*Time:\s*(.+?)\s*(?:<|$)", re.IGNORECASE)
 _TICKET_RE = re.compile(r"→\s*Ticket:\s*(.+?)\s*(?:<|$)", re.IGNORECASE)
 
@@ -21,11 +23,22 @@ def clean_title(raw: str) -> str:
     return html_lib.unescape(raw).strip()
 
 
+def is_junk_title(title: str) -> bool:
+    lowered = title.lower()
+    return any(term in lowered for term in _JUNK_TITLE_TERMS)
+
+
+def _now(tz) -> datetime:
+    return datetime.now(tz)
+
+
 def strip_html(raw: str) -> str:
     return BeautifulSoup(raw, "html.parser").get_text(" ", strip=True)
 
 
-def parse_event_datetime(title: str, tz) -> tuple[datetime | None, bool]:
+def parse_event_datetime(
+    title: str, tz, now: datetime | None = None,
+) -> tuple[datetime | None, bool]:
     m = _DOT_PREFIX.search(title)
     if m:
         day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -38,8 +51,15 @@ def parse_event_datetime(title: str, tz) -> tuple[datetime | None, bool]:
     m = _NATURAL_DATE.search(title)
     if m:
         try:
-            dt = dateutil_parser.parse(m.group(0))
-            return dt.replace(tzinfo=tz), False
+            if m.group("year"):
+                return dateutil_parser.parse(m.group(0)).replace(tzinfo=tz), False
+            now = now or _now(tz)
+            dt = dateutil_parser.parse(m.group(0), default=datetime(now.year, 1, 1))
+            dt = dt.replace(tzinfo=tz)
+            # Yearless dates well in the past mean next year (e.g. "January 10th" seen in December).
+            if (now.date() - dt.date()).days > _ROLL_FORWARD_DAYS:
+                dt = dt.replace(year=dt.year + 1)
+            return dt, False
         except (ValueError, OverflowError):
             return None, False
     return None, False

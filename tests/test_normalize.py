@@ -1,12 +1,15 @@
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from src.scraping.normalize import (
-    clean_title, extract_price, extract_time, fingerprint, parse_event_datetime,
+    clean_title, extract_price, extract_time, fingerprint, is_junk_title,
+    parse_event_datetime,
 )
 
 TZ = ZoneInfo("Australia/Perth")
+NOW = datetime(2026, 10, 23, 12, 0, tzinfo=TZ)
 
 
 def test_clean_title_entities():
@@ -29,6 +32,69 @@ def test_parse_natural_language_suffix():
     dt, _ = parse_event_datetime(
         "Friday Night Magic – Reality Fracture draft – Friday October 23rd 2026", TZ)
     assert dt is not None and dt.month == 10 and dt.day == 23 and dt.year == 2026
+
+
+def test_yearless_natural_date_with_weekday():
+    dt, known = parse_event_datetime("Warhammer – Saturday November 7th", TZ, now=NOW)
+    assert (dt.year, dt.month, dt.day) == (2026, 11, 7)
+    assert dt.tzinfo is not None and known is False
+
+
+def test_yearless_natural_date_without_weekday():
+    dt, _ = parse_event_datetime("Something – November 7th", TZ, now=NOW)
+    assert (dt.year, dt.month, dt.day) == (2026, 11, 7)
+
+
+def test_yearless_date_within_30_days_past_does_not_roll():
+    dt, _ = parse_event_datetime("Event – October 1st", TZ, now=NOW)
+    assert (dt.year, dt.month, dt.day) == (2026, 10, 1)
+
+
+def test_yearless_date_exactly_30_days_past_does_not_roll():
+    dt, _ = parse_event_datetime("Event – September 23rd", TZ, now=NOW)
+    assert (dt.year, dt.month, dt.day) == (2026, 9, 23)
+
+
+def test_yearless_date_over_30_days_past_rolls_forward():
+    dt, _ = parse_event_datetime("Event – September 22nd", TZ, now=NOW)
+    assert (dt.year, dt.month, dt.day) == (2027, 9, 22)
+
+
+def test_yearless_january_title_in_december_rolls_to_next_year():
+    now = datetime(2026, 12, 20, 9, 0, tzinfo=TZ)
+    dt, _ = parse_event_datetime("New Year Open – January 10th", TZ, now=now)
+    assert (dt.year, dt.month, dt.day) == (2027, 1, 10)
+
+
+def test_year_present_never_rolls_forward():
+    dt, _ = parse_event_datetime("Old Event – January 10th 2025", TZ, now=NOW)
+    assert (dt.year, dt.month, dt.day) == (2025, 1, 10)
+
+
+def test_dot_prefix_wins_over_yearless_natural_date():
+    dt, _ = parse_event_datetime("05.11.26 – Duels – Saturday November 7th", TZ, now=NOW)
+    assert (dt.year, dt.month, dt.day) == (2026, 11, 5)
+
+
+def test_yearless_invalid_day_returns_none():
+    dt, known = parse_event_datetime("Event – February 30th", TZ, now=NOW)
+    assert dt is None and known is False
+
+
+@pytest.mark.parametrize("title", [
+    "Test event 30.09", "Product placeholder", "Painters Guild Entry",
+    "PAINTERS GUILD night", "A TEST", "Latest news", "Product PlaceHolder",
+])
+def test_is_junk_title_true(title):
+    assert is_junk_title(title) is True
+
+
+@pytest.mark.parametrize("title", [
+    "Welcome to Night City – Cyberpunk TCG Prelease", "Weekly Duels",
+    "Painters night", "Guild Wars", "",
+])
+def test_is_junk_title_false(title):
+    assert is_junk_title(title) is False
 
 
 def test_parse_no_date_returns_none():
@@ -106,9 +172,10 @@ def test_parse_date_forms(title, ymd):
     assert dt.tzinfo is TZ
 
 
-def test_parse_natural_date_without_year_is_none():
-    dt, _ = parse_event_datetime("Event – Saturday November 7th", TZ)
-    assert dt is None
+def test_parse_natural_date_without_year_uses_current_year():
+    dt, _ = parse_event_datetime("Event – Saturday November 7th", TZ, now=NOW)
+    assert dt is not None and dt.tzinfo is TZ
+    assert (dt.year, dt.month, dt.day) == (2026, 11, 7)
 
 
 @pytest.mark.parametrize("html,expected", [

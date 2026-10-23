@@ -8,6 +8,11 @@ from src.db.repositories import get_active_events
 from src.services.event_service import upsert_products
 
 SLUG = "05-11-26-weekly-duels"
+JUNK_COUNT = 3  # test-event-30-09, product-placeholder, painters-guild-entry
+
+
+def _real_count(products) -> int:
+    return len(products) - JUNK_COUNT
 
 
 def _row(session, external_id: str) -> Event:
@@ -21,25 +26,56 @@ def _product(products, slug_part=SLUG):
 
 def test_upsert_all_fixture_events(session, fixture_products, tz):
     stats = upsert_products(session, guild_id=1, products=fixture_products, tz=tz)
-    assert stats["created"] == len(fixture_products)
+    assert stats["fetched"] == len(fixture_products)
+    assert stats["filtered"] == JUNK_COUNT
+    assert stats["created"] == _real_count(fixture_products)
     assert stats["failed"] == 0
-    assert len(get_active_events(session, 1)) == len(fixture_products)
+    assert len(get_active_events(session, 1)) == _real_count(fixture_products)
+
+
+def test_junk_products_not_persisted(session, fixture_products, tz):
+    upsert_products(session, 1, fixture_products, tz)
+    titles = [e.title.lower() for e in session.query(Event).all()]
+    assert not any(
+        j in t for t in titles for j in ("test", "placeholder", "painters guild"))
+
+
+def test_junk_products_are_seen_and_never_stale_deactivated(
+        session, fixture_products, tz):
+    junk = next(p for p in fixture_products if p["slug"] == "product-placeholder")
+    # A pre-existing active row for the junk id (e.g. from before the filter existed).
+    session.add(Event(guild_id=1, external_id=f"wp:{junk['id']}", title="Product placeholder",
+                      url="u", fingerprint="x", is_active=True))
+    session.commit()
+    stats = [upsert_products(session, 1, fixture_products, tz) for _ in range(3)]
+    assert all(s["deactivated"] == 0 for s in stats)
+    assert _row(session, f"wp:{junk['id']}").is_active is True
+
+
+def test_filtered_not_counted_in_created_or_updated(session, tz):
+    junk = {"id": 1, "slug": "t", "title": {"rendered": "Test event"},
+            "content": {"rendered": ""}, "link": "http://x"}
+    stats = upsert_products(session, 1, [junk], tz)
+    assert (stats["filtered"], stats["created"], stats["updated"],
+            stats["unchanged"], stats["failed"]) == (1, 0, 0, 0, 0)
+    assert session.query(Event).count() == 0
 
 
 def test_upsert_is_idempotent(session, fixture_products, tz):
     upsert_products(session, 1, fixture_products, tz)
     stats = upsert_products(session, 1, fixture_products, tz)
     assert stats["created"] == 0
-    assert stats["unchanged"] == len(fixture_products)
+    assert stats["unchanged"] == _real_count(fixture_products)
     assert stats["updated"] == 0
-    assert len(get_active_events(session, 1)) == len(fixture_products)
+    assert stats["filtered"] == JUNK_COUNT
+    assert len(get_active_events(session, 1)) == _real_count(fixture_products)
 
 
 def test_stale_deactivation(session, fixture_products, tz):
     upsert_products(session, 1, fixture_products, tz)
     upsert_products(session, 1, fixture_products[:5], tz)  # miss 1
     stats = upsert_products(session, 1, fixture_products[:5], tz)  # miss 2
-    assert stats["deactivated"] == len(fixture_products) - 5
+    assert stats["deactivated"] == _real_count(fixture_products) - 5
     assert len(get_active_events(session, 1)) == 5
 
 
@@ -57,7 +93,7 @@ def test_price_change_is_detected(session, fixture_products, tz):
     stats = upsert_products(session, 1, mutated, tz)
 
     assert stats["updated"] == 1
-    assert stats["unchanged"] == len(fixture_products) - 1
+    assert stats["unchanged"] == _real_count(fixture_products) - 1
     assert stats["created"] == 0
     after = _row(session, ext_id)
     assert after.price_text == "$12"
@@ -67,7 +103,7 @@ def test_price_change_is_detected(session, fixture_products, tz):
 def test_unchanged_reupsert_counts_unchanged(session, fixture_products, tz):
     upsert_products(session, 1, fixture_products, tz)
     stats = upsert_products(session, 1, copy.deepcopy(fixture_products), tz)
-    assert (stats["updated"], stats["unchanged"]) == (0, len(fixture_products))
+    assert (stats["updated"], stats["unchanged"]) == (0, _real_count(fixture_products))
 
 
 def test_title_change_same_wp_id_keeps_row_count(session, fixture_products, tz):
@@ -78,7 +114,7 @@ def test_title_change_same_wp_id_keeps_row_count(session, fixture_products, tz):
     stats = upsert_products(session, 1, mutated, tz)
 
     assert stats["updated"] == 1 and stats["created"] == 0
-    assert session.query(Event).count() == len(fixture_products)
+    assert session.query(Event).count() == _real_count(fixture_products)
     assert _row(session, f"wp:{p['id']}").title == "05.11.26 – Weekly Duels – Renamed"
 
 
@@ -92,10 +128,10 @@ def test_poison_product_is_isolated_and_not_deactivated(
         stats2 = upsert_products(session, 1, poison, tz)
         stats3 = upsert_products(session, 1, poison, tz)
     assert stats1["failed"] == 1
-    assert stats1["unchanged"] == len(fixture_products) - 1
+    assert stats1["unchanged"] == _real_count(fixture_products) - 1
     assert stats3["deactivated"] == 0
     assert stats2["deactivated"] == 0
-    assert len(get_active_events(session, 1)) == len(fixture_products)
+    assert len(get_active_events(session, 1)) == _real_count(fixture_products)
     assert str(_product(poison)["id"]) in caplog.text
 
 

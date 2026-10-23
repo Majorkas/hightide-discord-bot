@@ -1,17 +1,13 @@
+from datetime import datetime
+
 import pytest
 
 from src.scraping.hightide_parser import (
     MAX_PRICE_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS, _extract_summary,
-    parse_product,
+    parse_product, parse_product_or_none,
 )
 
-UNDATED_SLUGS = [
-    "test-event-30-09",
-    "painters-guild-entry",
-    "product-placeholder",
-    # Yearless natural-language date: not parseable, falls back to TBA.
-    "warhammer-40000-the-damnos-incident-saturday-november-7th",
-]
+JUNK_SLUGS = ["test-event-30-09", "product-placeholder", "painters-guild-entry"]
 
 
 @pytest.fixture
@@ -92,18 +88,54 @@ def test_time_overlay_range_leaves_time_unknown(tz):
 
 
 def test_all_fixture_products_parse_without_error(fixture_products, tz):
-    for product in fixture_products:
-        ev = parse_product(product, tz)
-        if ev.starts_at is not None:
+    parsed = [parse_product_or_none(p, tz) for p in fixture_products]
+    assert sum(ev is None for ev in parsed) == 3
+    for product, ev in zip(fixture_products, parsed):
+        if ev is not None and ev.starts_at is not None:
             assert ev.starts_at.tzinfo is not None, (
                 f"Product {product['id']} has non-aware datetime")
 
 
-@pytest.mark.parametrize("slug", UNDATED_SLUGS)
-def test_undated_fixtures_fall_back_to_tba(by_slug, tz, slug):
-    ev = parse_product(by_slug(slug), tz)
-    assert ev.starts_at is None
+@pytest.mark.parametrize("slug", JUNK_SLUGS)
+def test_junk_fixture_products_are_filtered(by_slug, tz, slug):
+    assert parse_product_or_none(by_slug(slug), tz) is None
+
+
+@pytest.mark.parametrize("slug", [
+    "05-11-26-weekly-duels", "friday-night-magic-countersculpt",
+    "welcome-to-night-city-cyperpunk-tcg-prelease",
+])
+def test_real_fixture_products_not_filtered(by_slug, tz, slug):
+    p = by_slug(slug)
+    ev = parse_product_or_none(p, tz)
+    assert ev is not None and ev.external_id == f"wp:{p['id']}"
+
+
+def test_parse_product_or_none_matches_parse_product_for_real(by_slug, tz):
+    p = by_slug("05-11-26-weekly-duels")
+    assert parse_product_or_none(p, tz) == parse_product(p, tz)
+
+
+def test_yearless_warhammer_fixture_parses_date(by_slug, tz, monkeypatch):
+    monkeypatch.setattr(
+        "src.scraping.normalize._now", lambda tz: datetime(2026, 10, 23, 12, tzinfo=tz))
+    ev = parse_product(by_slug("warhammer-40000-the-damnos-incident"), tz)
+    assert ev.starts_at is not None
+    assert (ev.starts_at.year, ev.starts_at.month, ev.starts_at.day) == (2026, 11, 7)
     assert ev.time_known is False
+
+
+def test_undated_title_falls_back_to_tba(tz):
+    ev = parse_product(_product("Mystery Night", "<p>Hello</p>"), tz)
+    assert ev.starts_at is None and ev.time_known is False
+
+
+def test_remaining_undated_real_fixtures_fall_back_to_tba(fixture_products, tz):
+    undated = [
+        p["slug"] for p in fixture_products
+        if (ev := parse_product_or_none(p, tz)) is not None and ev.starts_at is None
+    ]
+    assert undated == []
 
 
 @pytest.mark.parametrize("time_text", ["10 - 6", "11", "soonish", "From 7"])

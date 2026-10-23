@@ -7,7 +7,7 @@ from dateutil import parser as dateutil_parser
 
 from src.scraping.normalize import (
     _DOT_PREFIX, _NATURAL_DATE, clean_title, extract_price, extract_time,
-    fingerprint, parse_event_datetime,
+    fingerprint, is_junk_title, parse_event_datetime,
 )
 
 MAX_TITLE_CHARS = 200
@@ -126,3 +126,9 @@ def parse_product(product: dict, tz) -> NormalizedEvent:
         image_url=_image_url(product),
         fingerprint=fp,
     )
+
+
+def parse_product_or_none(product: dict, tz) -> NormalizedEvent | None:
+    if is_junk_title(clean_title(product["title"]["rendered"])):
+        return None
+    return parse_product(product, tz)

@@ -6,18 +6,24 @@ from src.db.repositories import (
     mark_absent_events_stale, upsert_event,
 )
 from src.scraping.fetcher import fetch_events
-from src.scraping.hightide_parser import parse_product
+from src.scraping.hightide_parser import parse_product_or_none
 
 log = logging.getLogger("hightide.events")
 
 
 def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
                     source_url: str | None = None) -> dict:
-    created = updated = unchanged = failed = 0
+    created = updated = unchanged = failed = filtered = 0
     seen: set[str] = set()
     for product in products:
         try:
-            ev = parse_product(product, tz)
+            ev = parse_product_or_none(product, tz)
+            if ev is None:
+                # Junk stays "seen" so stale-marking never touches it.
+                filtered += 1
+                if product.get("id") is not None:
+                    seen.add(f"wp:{product['id']}")
+                continue
             data = {
                 "external_id": ev.external_id,
                 "title": ev.title,
@@ -53,6 +59,7 @@ def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
     stats = {
         "fetched": len(products), "created": created, "updated": updated,
         "unchanged": unchanged, "deactivated": deactivated, "failed": failed,
+        "filtered": filtered,
     }
     log.info("upsert complete: %s", stats)
     return stats
