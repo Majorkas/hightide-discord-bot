@@ -183,7 +183,7 @@ class AdminCog(commands.Cog):
             import logging
             logging.getLogger("hightide").exception("board refresh failed")
             await interaction.followup.send(
-                f"Refresh failed: {type(e).__name__}: {str(e)}",
+                f"Refresh failed: {type(e).__name__}",
                 ephemeral=True
             )
 
@@ -217,7 +217,7 @@ class AdminCog(commands.Cog):
             import logging
             logging.getLogger("hightide").exception("board recreate failed")
             await interaction.followup.send(
-                f"Recreate failed: {type(e).__name__}: {str(e)}", ephemeral=True)
+                f"Recreate failed: {type(e).__name__}", ephemeral=True)
             return
         await interaction.followup.send(
             f"{board_type} board action: {action}", ephemeral=True)

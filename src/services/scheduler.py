@@ -14,6 +14,7 @@ from src.services.event_service import refresh_events
 log = logging.getLogger("hightide.scheduler")
 
 _RETRY_INTERVAL = timedelta(minutes=30)
+_MAX_RETRY_DELAY = timedelta(hours=2)
 
 # Created lazily; tests can monkeypatch or reset to None.
 _session_factory = None
@@ -48,17 +49,20 @@ def _in_run_window(daily_hhmm: str, now: datetime) -> bool:
     return (now.hour, now.minute) >= (h, m)
 
 
-async def run_daily_refresh(bot, guild_id: int) -> dict:
+async def run_daily_refresh(bot, guild_id: int, *, fetch: bool = True) -> dict:
     with _get_session_factory()() as session:
         cfg = get_or_create_config(session, guild_id)
         tz = ZoneInfo(cfg.timezone)
-        try:
-            events = await asyncio.to_thread(
-                refresh_events, session, guild_id, "https://hightidetabletop.com.au", tz
-            )
-        except Exception as e:
-            log.exception("event refresh failed")
-            events = f"error:{type(e).__name__}"
+        if fetch:
+            try:
+                events = await asyncio.to_thread(
+                    refresh_events, session, guild_id, "https://hightidetabletop.com.au", tz
+                )
+            except Exception as e:
+                log.exception("event refresh failed")
+                events = f"error:{type(e).__name__}"
+        else:
+            events = "cached"
         result = {"events": events}
         for board_type in ("this_week", "this_month"):
             try:
@@ -75,6 +79,10 @@ class RefreshScheduler:
         self.bot = bot
         self._last_run_key: str | None = None
         self._last_attempt: datetime | None = None
+        self._events_done_key: str | None = None
+        self._retry_delay: timedelta = _RETRY_INTERVAL
+        self._next_attempt: datetime | None = None
+        self._backoff_day: str | None = None
 
     def start(self):
         self.tick.start()
@@ -91,18 +99,33 @@ class RefreshScheduler:
                 tz = ZoneInfo(cfg.timezone)
                 now = _now(tz)
                 today = now.strftime("%Y-%m-%d")
+                if self._backoff_day != today:
+                    # Backoff is per-day: a bad day must not delay the next day's run.
+                    self._backoff_day = today
+                    self._retry_delay = _RETRY_INTERVAL
+                    self._next_attempt = None
                 if (_in_run_window(cfg.daily_refresh_time, now)
                         and self._last_run_key != today
-                        and (self._last_attempt is None
-                             or now - self._last_attempt >= _RETRY_INTERVAL)):
+                        and (self._next_attempt is None or now >= self._next_attempt)):
                     self._last_attempt = now
-                    result = await run_daily_refresh(self.bot, cfg.guild_id)
-                    # Only set _last_run_key if the run fully succeeded (no errors)
-                    has_error = any(
-                        isinstance(v, str) and v.startswith("error:")
-                        for v in result.values()
-                    )
-                    if not has_error:
-                        self._last_run_key = today
+                    fetch = self._events_done_key != today
+                    failed = True
+                    try:
+                        result = await run_daily_refresh(self.bot, cfg.guild_id, fetch=fetch)
+                        has_error = any(
+                            isinstance(v, str) and v.startswith("error:")
+                            for v in result.values()
+                        )
+                        if isinstance(result.get("events"), dict):
+                            self._events_done_key = today
+                        if not has_error:
+                            self._last_run_key = today
+                            self._retry_delay = _RETRY_INTERVAL
+                            self._next_attempt = None
+                            failed = False
+                    finally:
+                        if failed:
+                            self._next_attempt = now + self._retry_delay
+                            self._retry_delay = min(self._retry_delay * 2, _MAX_RETRY_DELAY)
             except Exception:
                 log.exception("scheduler tick failed")

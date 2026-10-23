@@ -86,9 +86,10 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
         return "no_channel"
     from zoneinfo import ZoneInfo
     tz = ZoneInfo(cfg.timezone)
-    events = filter_events_for_board(get_active_events(session, guild_id), board_type, cfg, tz)
+    now = datetime.now(tz)
+    events = filter_events_for_board(get_active_events(session, guild_id), board_type, cfg, tz, now=now)
     new_hash = render_board_hash(events, board_type, cfg, tz)
-    key = period_key(board_type, tz)
+    key = period_key(board_type, tz, now=now)
     title = "This Week at Hightide" if board_type == "this_week" else "This Month at Hightide"
     embed = build_board_embed(events, title, tz, cfg.include_tba_section)
 
@@ -122,24 +123,41 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
     # Handle rollover or send new message
     if is_rollover:
         # Month rollover: send new message, save immediately, then optionally delete old one
-        msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        # Save old channel_id and message_id before updating post (for proper cleanup)
+        prefetched_old = msg
         old_channel_id = post.channel_id
         old_message_id = post.message_id
+        new_msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         # Save before delete to avoid orphaned message if delete fails
-        save_board_post(session, guild_id, board_type, key,
-                        channel.id, msg.id, new_hash)
+        try:
+            save_board_post(session, guild_id, board_type, key,
+                            channel.id, new_msg.id, new_hash)
+        except Exception:
+            log.exception("saving rolled-over board post failed for %s; removing new message", board_type)
+            try:
+                await new_msg.delete()
+            except Exception:
+                log.exception("cleanup of unsaved board message failed for %s", board_type)
+            raise
 
         # Try to delete old message if configured (best effort)
         if cfg.delete_previous_month_message:
             try:
-                old_channel = bot.get_channel(old_channel_id) or await bot.fetch_channel(old_channel_id)
-                old_msg = await old_channel.fetch_message(old_message_id)
+                if prefetched_old is not None:
+                    old_msg = prefetched_old
+                else:
+                    old_channel = bot.get_channel(old_channel_id) or await bot.fetch_channel(old_channel_id)
+                    old_msg = None
+                    old_guild = getattr(old_channel, "guild", None)
+                    if old_guild is not None and old_guild.id != guild_id:
+                        log.warning("old board channel %s belongs to another guild; skipping delete",
+                                    old_channel_id)
+                    else:
+                        old_msg = await old_channel.fetch_message(old_message_id)
                 # Apply authorship guard: only delete if bot sent it
-                if old_msg.author.id == bot.user.id:
+                if old_msg is not None and old_msg.author.id == bot.user.id:
                     await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                log.debug("could not delete previous month message for %s", board_type)
+            except Exception:
+                log.exception("could not delete previous month message for %s", board_type)
 
         return "recreated"
 
