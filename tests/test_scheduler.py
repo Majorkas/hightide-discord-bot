@@ -78,7 +78,6 @@ def _bot():
 
 # --- run_daily_refresh ---
 
-@pytest.mark.asyncio
 async def test_run_daily_refresh(temp_db, monkeypatch):
     _seed(temp_db)
     monkeypatch.setattr("src.services.scheduler.refresh_events",
@@ -99,7 +98,6 @@ async def test_run_daily_refresh(temp_db, monkeypatch):
         assert c.args[2] == 999
 
 
-@pytest.mark.asyncio
 async def test_run_daily_refresh_fetch_failure_still_updates_boards(temp_db, monkeypatch):
     _seed(temp_db)
     monkeypatch.setattr("src.services.scheduler.refresh_events",
@@ -115,7 +113,6 @@ async def test_run_daily_refresh_fetch_failure_still_updates_boards(temp_db, mon
     assert mock_upsert.await_count == 2
 
 
-@pytest.mark.asyncio
 async def test_run_daily_refresh_one_board_failure_isolated(temp_db, monkeypatch):
     _seed(temp_db)
     monkeypatch.setattr("src.services.scheduler.refresh_events",
@@ -132,7 +129,6 @@ async def test_run_daily_refresh_one_board_failure_isolated(temp_db, monkeypatch
 
 # --- tick ---
 
-@pytest.mark.asyncio
 async def test_tick_guild_id_none_skip(temp_db, monkeypatch):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", None)
     mock_refresh = AsyncMock()
@@ -146,7 +142,6 @@ async def test_tick_guild_id_none_skip(temp_db, monkeypatch):
     bot.wait_until_ready.assert_awaited_once()
 
 
-@pytest.mark.asyncio
 async def test_tick_runs_at_matching_time(temp_db, monkeypatch, clock):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
     _seed(temp_db, daily_refresh_time="09:00")
@@ -161,7 +156,6 @@ async def test_tick_runs_at_matching_time(temp_db, monkeypatch, clock):
     assert inst._last_run_key == "2026-10-23"
 
 
-@pytest.mark.asyncio
 async def test_tick_does_not_run_before_time(temp_db, monkeypatch, clock):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
     _seed(temp_db, daily_refresh_time="09:30")
@@ -176,7 +170,6 @@ async def test_tick_does_not_run_before_time(temp_db, monkeypatch, clock):
     assert inst._last_attempt is None
 
 
-@pytest.mark.asyncio
 async def test_tick_runs_late_after_missed_minute(temp_db, monkeypatch, clock):
     """A tick well after the configured time still triggers the daily run."""
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
@@ -192,7 +185,6 @@ async def test_tick_runs_late_after_missed_minute(temp_db, monkeypatch, clock):
     mock_refresh.assert_awaited_once()
 
 
-@pytest.mark.asyncio
 async def test_tick_same_day_guard_and_next_day(temp_db, monkeypatch, clock):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
     _seed(temp_db, daily_refresh_time="09:00")
@@ -216,7 +208,6 @@ async def test_tick_same_day_guard_and_next_day(temp_db, monkeypatch, clock):
     assert inst._last_run_key == "2026-10-24"
 
 
-@pytest.mark.asyncio
 async def test_tick_failure_swallowed_and_retried_after_window(temp_db, monkeypatch, clock):
     monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
     _seed(temp_db, daily_refresh_time="09:00")
@@ -246,8 +237,7 @@ async def test_tick_failure_swallowed_and_retried_after_window(temp_db, monkeypa
     assert mock_refresh.await_count == 2
 
 
-@pytest.mark.asyncio
-async def test_tick_partial_error_does_not_set_last_run_key(temp_db, monkeypatch, clock):
+async def test_tick_fetch_error_does_not_set_last_run_key(temp_db, monkeypatch, clock):
     """
     When run_daily_refresh returns a result with any error string (e.g., events="error:..."),
     _last_run_key should NOT be set so retry happens after 30-minute window.
@@ -281,7 +271,6 @@ async def test_tick_partial_error_does_not_set_last_run_key(temp_db, monkeypatch
     assert mock_refresh.await_count == 2
 
 
-@pytest.mark.asyncio
 async def test_tick_board_error_does_not_set_last_run_key(temp_db, monkeypatch, clock):
     """
     When run_daily_refresh returns a result with board error (e.g., this_month="error:..."),
@@ -305,7 +294,6 @@ async def test_tick_board_error_does_not_set_last_run_key(temp_db, monkeypatch, 
     assert inst._last_run_key is None
 
 
-@pytest.mark.asyncio
 async def test_tick_full_success_sets_last_run_key(temp_db, monkeypatch, clock):
     """
     When run_daily_refresh returns a result with no error strings,
@@ -326,3 +314,181 @@ async def test_tick_full_success_sets_last_run_key(temp_db, monkeypatch, clock):
 
     # All values are non-error, so _last_run_key should be set
     assert inst._last_run_key == "2026-10-23"
+
+
+# --- fetch-once-per-day + bounded backoff ---
+
+_BOARD_FAIL = {"events": {"added": 1}, "this_week": "error:RuntimeError", "this_month": "created"}
+_FETCH_FAIL = {"events": "error:ConnectionError", "this_week": "created", "this_month": "created"}
+_OK = {"events": {"added": 1}, "this_week": "created", "this_month": "created"}
+_OK_CACHED = {"events": "cached", "this_week": "edited", "this_month": "skipped"}
+
+
+def _fetch_flags(mock_refresh):
+    return [c.kwargs["fetch"] for c in mock_refresh.await_args_list]
+
+
+async def _tick(inst):
+    await inst.tick.coro(inst)
+
+
+async def test_run_daily_refresh_fetch_false_skips_refresh_events(temp_db, monkeypatch):
+    _seed(temp_db)
+    mock_events = MagicMock(return_value={"added": 1})
+    monkeypatch.setattr("src.services.scheduler.refresh_events", mock_events)
+    mock_upsert = AsyncMock(side_effect=["edited", "skipped"])
+    monkeypatch.setattr("src.services.scheduler.upsert_board", mock_upsert)
+
+    result = await scheduler.run_daily_refresh(MagicMock(), 999, fetch=False)
+
+    mock_events.assert_not_called()
+    assert result == {"events": "cached", "this_week": "edited", "this_month": "skipped"}
+    assert mock_upsert.await_count == 2
+
+
+async def test_tick_events_success_board_failure_retry_skips_fetch(temp_db, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    mock_refresh = AsyncMock(side_effect=[_BOARD_FAIL, _OK_CACHED])
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await _tick(inst)
+    assert inst._events_done_key == "2026-10-23"
+    assert inst._last_run_key is None
+
+    clock.now += timedelta(minutes=30)
+    await _tick(inst)
+
+    assert _fetch_flags(mock_refresh) == [True, False]
+    assert inst._last_run_key == "2026-10-23"
+
+
+async def test_tick_board_failure_retry_does_not_refetch_upstream(temp_db, monkeypatch, clock):
+    """End-to-end with the real run_daily_refresh: WP site is fetched once."""
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    mock_events = MagicMock(return_value={"added": 1})
+    monkeypatch.setattr("src.services.scheduler.refresh_events", mock_events)
+    mock_upsert = AsyncMock(side_effect=[RuntimeError("x"), "created", "created", "skipped"])
+    monkeypatch.setattr("src.services.scheduler.upsert_board", mock_upsert)
+
+    inst = RefreshScheduler(_bot())
+    await _tick(inst)
+    clock.now += timedelta(minutes=30)
+    await _tick(inst)
+
+    assert mock_events.call_count == 1
+    assert mock_upsert.await_count == 4
+    assert inst._last_run_key == "2026-10-23"
+
+
+async def test_tick_fetch_failure_retry_refetches(temp_db, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    mock_refresh = AsyncMock(side_effect=[_FETCH_FAIL, _OK])
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await _tick(inst)
+    assert inst._events_done_key is None
+
+    clock.now += timedelta(minutes=30)
+    await _tick(inst)
+
+    assert _fetch_flags(mock_refresh) == [True, True]
+    assert inst._events_done_key == "2026-10-23"
+    assert inst._last_run_key == "2026-10-23"
+
+
+async def test_tick_error_error_then_success_sets_last_run_key(temp_db, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    mock_refresh = AsyncMock(side_effect=[_FETCH_FAIL, _FETCH_FAIL, _OK])
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await _tick(inst)  # 09:00 fails
+
+    clock.now += timedelta(minutes=29)
+    await _tick(inst)
+    assert mock_refresh.await_count == 1
+
+    clock.now += timedelta(minutes=1)  # 09:30 fails again
+    await _tick(inst)
+    assert mock_refresh.await_count == 2
+    assert inst._last_run_key is None
+
+    clock.now += timedelta(minutes=59)  # delay doubled to 1h
+    await _tick(inst)
+    assert mock_refresh.await_count == 2
+
+    clock.now += timedelta(minutes=1)  # 10:30 succeeds
+    await _tick(inst)
+    assert mock_refresh.await_count == 3
+    assert inst._last_run_key == "2026-10-23"
+    assert inst._retry_delay == timedelta(minutes=30)
+
+
+async def test_tick_retry_delay_doubles_and_caps_at_two_hours(temp_db, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    mock_refresh = AsyncMock(return_value=_FETCH_FAIL)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await _tick(inst)
+    count = 1
+    for wait_minutes in (30, 60, 120, 120):
+        clock.now += timedelta(minutes=wait_minutes - 1)
+        await _tick(inst)
+        assert mock_refresh.await_count == count, f"retried early before {wait_minutes}m"
+        clock.now += timedelta(minutes=1)
+        await _tick(inst)
+        count += 1
+        assert mock_refresh.await_count == count
+    assert inst._retry_delay == timedelta(hours=2)
+
+
+async def test_tick_exception_also_backs_off(temp_db, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    mock_refresh = AsyncMock(side_effect=RuntimeError("down"))
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await _tick(inst)
+    clock.now += timedelta(minutes=30)
+    await _tick(inst)
+    assert mock_refresh.await_count == 2
+
+    clock.now += timedelta(minutes=59)
+    await _tick(inst)
+    assert mock_refresh.await_count == 2
+    clock.now += timedelta(minutes=1)
+    await _tick(inst)
+    assert mock_refresh.await_count == 3
+
+
+async def test_tick_failure_on_day_n_does_not_block_next_day(temp_db, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00")
+    mock_refresh = AsyncMock(side_effect=[_BOARD_FAIL, _BOARD_FAIL, _BOARD_FAIL, _OK])
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await _tick(inst)  # 09:00
+    clock.now += timedelta(minutes=30)
+    await _tick(inst)  # 09:30
+    clock.now += timedelta(hours=1)
+    await _tick(inst)  # 10:30, next retry not until 12:30
+    assert mock_refresh.await_count == 3
+    assert inst._last_run_key is None
+
+    clock.now = datetime(2026, 10, 24, 9, 0, tzinfo=TZ)
+    await _tick(inst)
+
+    assert mock_refresh.await_count == 4
+    assert _fetch_flags(mock_refresh)[-1] is True  # new day refetches upstream
+    assert inst._last_run_key == "2026-10-24"
+    assert inst._events_done_key == "2026-10-24"

@@ -249,7 +249,7 @@ async def test_board_refresh_error(db, cog, interaction, monkeypatch):
     args, kwargs = interaction.followup.send.call_args
     assert "Refresh failed" in args[0]
     assert "RuntimeError" in args[0]
-    assert "Test error" in args[0]
+    assert "Test error" not in args[0]
     assert kwargs.get("ephemeral") is True
 
 
@@ -415,6 +415,7 @@ async def test_board_recreate_upsert_failure_sends_ephemeral_followup(db, cog, i
     args, kwargs = interaction.followup.send.call_args
     assert "failed" in args[0].lower()
     assert "RuntimeError" in args[0]
+    assert "kaput" not in args[0]
     assert kwargs.get("ephemeral") is True
 
 

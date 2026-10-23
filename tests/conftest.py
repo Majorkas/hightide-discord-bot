@@ -6,8 +6,16 @@ import pytest
 
 from src.db.models import Base
 from src.db.session import get_engine, get_session_factory
+from src.services import board_service
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "wp_products_events.json"
+
+
+@pytest.fixture(autouse=True)
+def _clear_board_locks():
+    board_service._board_locks.clear()
+    yield
+    board_service._board_locks.clear()
 
 
 @pytest.fixture
