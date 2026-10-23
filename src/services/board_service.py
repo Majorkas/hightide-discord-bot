@@ -100,7 +100,7 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
     if post and post.channel_id == channel.id:
         try:
             msg = await channel.fetch_message(post.message_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        except (discord.NotFound, discord.Forbidden):
             log.info("board message missing for %s, recreating", board_type)
 
     # Check if this is a period rollover for this_month

@@ -363,13 +363,13 @@ async def test_month_rollover_skips_delete_for_foreign_author(session):
 
 async def test_month_rollover_delete_attempts_on_stored_channel(session):
     """
-    Rollover delete logic attempts to fetch from the stored channel (post.channel_id).
+    Rollover delete logic fetches and deletes the old message from the stored channel.
     """
     _seed(session)
     month_channel = _channel(222)
     bot = _bot(month_channel)
 
-    # First call
+    # First call: create initial post
     month_channel.send = AsyncMock(return_value=_message(100))
     month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
 
@@ -383,7 +383,7 @@ async def test_month_rollover_delete_attempts_on_stored_channel(session):
     month_channel.send.reset_mock()
     month_channel.fetch_message.reset_mock()
 
-    # Create old message
+    # Second call: rollover (period changed)
     old_msg = _message(100, author_id=9999)
     new_msg = _message(200)
     month_channel.fetch_message = AsyncMock(return_value=old_msg)
@@ -396,23 +396,36 @@ async def test_month_rollover_delete_attempts_on_stored_channel(session):
 
     assert result2 == "recreated"
 
-    # Verify the old message's delete was attempted
+    # Verify delete attempted: fetch_message called with old message_id and delete called
+    month_channel.fetch_message.assert_awaited()  # At least called (may be called multiple times)
     old_msg.delete.assert_awaited_once()
+    # Verify new message sent
+    month_channel.send.assert_awaited_once()
 
     post2 = get_board_post(session, GUILD, "this_month")
     assert post2.message_id == 200
+    assert post2.channel_id == 222  # Now points to new channel
 
 
 async def test_month_rollover_handles_http_exception_on_fetch(session):
     """
-    fetch_message raises HTTPException (e.g., network error).
-    Should still recreate successfully with BoardPost pointing at NEW message.
+    DELETED: HTTPException now propagates per fix.
+    See test_initial_fetch_http_exception_propagates_no_duplicate_post instead.
+    """
+    pass
+
+
+async def test_initial_fetch_http_exception_propagates_no_duplicate_post(session):
+    """
+    REGRESSION TEST: HTTPException from initial fetch should propagate.
+    Before fix: caught by broad exception, msg=None, posts duplicate.
+    After fix: propagates, upsert_board raises, no message sent.
     """
     _seed(session)
     month_channel = _channel(222)
     bot = _bot(month_channel)
 
-    # First call
+    # First call: create initial board post
     month_channel.send = AsyncMock(return_value=_message(100))
     month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
 
@@ -420,29 +433,23 @@ async def test_month_rollover_handles_http_exception_on_fetch(session):
     assert result1 == "created"
 
     post1 = get_board_post(session, GUILD, "this_month")
-    post1.period_key = "2026-09"
-    session.commit()
+    assert post1.message_id == 100
 
+    # Reset for second call
     month_channel.send.reset_mock()
+    month_channel.fetch_message.reset_mock()
 
-    # fetch_message raises HTTPException
+    # Second call: fetch_message raises HTTPException (5xx or rate limit)
     month_channel.fetch_message = AsyncMock(
         side_effect=_http_exc(discord.HTTPException, 500)
     )
-    new_msg = _message(200)
-    month_channel.send = AsyncMock(return_value=new_msg)
 
-    from unittest.mock import patch
+    # Verify HTTPException propagates (upsert_board raises)
+    with pytest.raises(discord.HTTPException):
+        await upsert_board(bot, session, GUILD, "this_month")
 
-    with patch("src.services.board_service.period_key", return_value="2026-10"):
-        result2 = await upsert_board(bot, session, GUILD, "this_month")
-
-    assert result2 == "recreated"
-
-    # BoardPost already points at new message (save-before-delete)
-    post2 = get_board_post(session, GUILD, "this_month")
-    assert post2.message_id == 200
-    assert post2.period_key == "2026-10"
+    # Verify NO new message was sent (this prevents the duplicate post regression)
+    month_channel.send.assert_not_called()
 
 
 # ============================================================================
