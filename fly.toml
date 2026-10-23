@@ -1,6 +1,10 @@
 app = "hightide-discord-bot"
 primary_region = "syd"
 
+[env]
+  DATABASE_URL = "sqlite:////data/hightide.db"
+  DEFAULT_TIMEZONE = "Australia/Perth"
+
 [build]
   dockerfile = "Dockerfile"
 

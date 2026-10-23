@@ -198,6 +198,7 @@ The bot is a worker (no ports, no HTTP). `fly.toml` uses `Dockerfile`, region `s
    ```bash
    fly launch --no-deploy
    ```
+   Afterwards, confirm `fly.toml` still has **no** `[http_service]` section and still has the `[mounts]`, `[[restart]]`, and `[[vm]]` blocks (fly launch can inject an http_service for Dockerfile apps).
 
 3. **Create the volume**:
    ```bash
@@ -207,13 +208,14 @@ The bot is a worker (no ports, no HTTP). `fly.toml` uses `Dockerfile`, region `s
 4. **Set secrets** (see Environment Variables above):
    ```bash
    fly secrets set DISCORD_TOKEN=... GUILD_ID=...
-   fly secrets set DATABASE_URL=sqlite:////data/hightide.db DEFAULT_TIMEZONE=Australia/Perth
    ```
+   (Note: `DATABASE_URL` and `DEFAULT_TIMEZONE` are already baked in `fly.toml` as non-secret env vars.)
 
 5. **Deploy**:
    ```bash
-   fly deploy
+   fly deploy --ha=false
    ```
+   **Important**: This bot must run exactly **one machine**. Two or more instances would cause the boards to be posted twice per refresh. The `--ha=false` flag ensures a single instance.
 
 6. **First run in Discord**: set `/config this_week_channel` and `/config this_month_channel`, then `/board refresh` (see Commands above).
 
@@ -276,10 +278,17 @@ tests/                       # pytest suite with fixtures
 
 **Database errors:**
 - Ensure `DATABASE_URL` points to a writable location.
-- On Railway/Render, verify the persistent volume is mounted and the path is correct.
+- On Fly.io/Railway/Render, verify the persistent volume is mounted at the correct path and the machine count is set to 1 (multiple instances would cause corruption or duplicate boards).
 
 **Board channel moved via `/config`:**
 - The previous board message stays in the old channel (delete it manually if unwanted); it is not reposted as a duplicate.
+
+**Secret management on Fly.io**:
+- `fly secrets set` puts values in your shell history. For sensitive tokens, use stdin instead:
+  ```bash
+  fly secrets import < .env
+  ```
+  (Verify with `fly secrets --help` for the exact subcommand and format in your flyctl version.)
 
 ## License
 
