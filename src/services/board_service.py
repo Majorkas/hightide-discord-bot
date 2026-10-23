@@ -54,9 +54,9 @@ def filter_events_for_board(events: list[Event], board_type: str, cfg, tz) -> li
 
 
 def render_board_hash(events: list[Event], board_type: str, cfg, tz) -> str:
-    parts = [board_type]
+    parts = [board_type, str(tz)]
     for e in sorted(events, key=lambda x: (x.starts_at or datetime.max.replace(tzinfo=tz), x.title)):
-        parts.append(f"{e.external_id}|{e.title}|{e.starts_at}|{e.price_text}|{e.time_known}")
+        parts.append(f"{e.external_id}|{e.title}|{e.starts_at}|{e.price_text}|{e.time_known}|{e.url}")
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -76,8 +76,13 @@ async def upsert_board(bot, session: Session, guild_id: int, board_type: str) ->
     channel = bot.get_channel(tz_channel) or await bot.fetch_channel(tz_channel)
     post = get_board_post(session, guild_id, board_type)
 
-    if post and post.render_hash == new_hash and post.period_key == key:
-        return "skipped"
+    if post and post.render_hash == new_hash and post.period_key == key and post.channel_id == channel.id:
+        try:
+            await channel.fetch_message(post.message_id)
+        except discord.NotFound:
+            log.info("board message missing for %s, recreating", board_type)
+        else:
+            return "skipped"
 
     # try to edit existing
     if post:
