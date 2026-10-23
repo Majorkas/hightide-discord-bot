@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import discord
 
 from src.db.models import Event, WeeklyRecurring
+from src.services.weekly_service import _extract_weekday_index
 
 # Discord embed limits
 MAX_EMBED_FIELDS = 25
@@ -190,14 +191,14 @@ def _weekly_line(row: WeeklyRecurring) -> str:
 
 
 def current_weekly_rows(rows, tz, now: datetime | None = None) -> list[WeeklyRecurring]:
-    """Enabled rows whose ends_on (if any) hasn't passed in the guild timezone, in display order."""
+    """Enabled rows whose ends_on (if any) hasn't passed in the guild timezone, sorted chronologically by weekday."""
     today = (now or datetime.now(tz)).astimezone(tz).date()
     keep = []
     for r in rows:
         ends = _parse_iso_date(r.ends_on)
         if r.enabled and (ends is None or ends >= today):
             keep.append(r)
-    return sorted(keep, key=lambda r: (r.sort_order or 0, r.id or 0))
+    return sorted(keep, key=lambda r: (_extract_weekday_index(r.days_text), r.time_text, r.sort_order or 0))
 
 
 def build_weekly_embed(rows, image_url: str | None, tz) -> discord.Embed:

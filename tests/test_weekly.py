@@ -65,10 +65,17 @@ def test_seed_inserts_six_rows_once(session):
     rows = session.execute(select(WeeklyRecurring).order_by(WeeklyRecurring.sort_order)).scalars().all()
     assert [r.sort_order for r in rows] == [0, 1, 2, 3, 4, 5]
     assert (rows[0].title, rows[0].days_text, rows[0].time_text) == ("DND Fremantle", "Mon & Thu", "6:00 PM")
-    assert rows[5].title == "Mordheim: The Cursed City Campaign"
-    assert rows[5].ends_on == "2026-12-09"
+    assert rows[1].title == "Mordheim: The Cursed City Campaign"
+    assert rows[1].ends_on == "2026-12-09"
+    assert rows[2].title == "Tabletop Freo — TCGs, Wargames & Board Games"
+    assert rows[2].days_text == "Wed"
+    assert rows[3].title == "Warhammer: The Old World — Friday Night Battle March (600 pts)"
+    assert rows[4].title == "Warhammer: The Horus Heresy — Heresy Fight Night (casual)"
+    assert rows[5].title == "MTG Casual Commander"
+    assert rows[5].days_text == "Sun"
     assert all(r.enabled for r in rows)
-    assert [r.ends_on for r in rows[:5]] == [None] * 5
+    assert rows[1].ends_on == "2026-12-09"
+    assert [r.ends_on for r in [rows[0], rows[2], rows[3], rows[4], rows[5]]] == [None] * 5
 
 
 def test_seed_is_per_guild(session):
@@ -134,6 +141,74 @@ def test_weekly_embed_image_only_valid_urls():
 def test_weekly_embed_neutralises_mentions():
     embed = build_weekly_embed([_row("@everyone")], None, TZ)
     assert "@everyone" not in embed.description
+
+
+def test_weekly_rows_sorted_chronologically_by_weekday():
+    """Seed shuffled; render and verify chronological order: Mon, Tue, Wed, Thu, Fri, Fri, Sun."""
+    from src.discord_ui.embeds import current_weekly_rows
+    
+    # Shuffle the default seed to test sorting
+    shuffled = [
+        _row("Sun MTG", "Sun", "11:00 AM", sort=0),
+        _row("Mon & Thu DND", "Mon & Thu", "6:00 PM", sort=1),
+        _row("Tue Mordheim", "Tue", "6:00 PM", sort=2),
+        _row("Wed Tabletop", "Wed", "4:00 PM", sort=3),
+        _row("Fri Old World", "Fri", "5:00 PM", sort=4),
+        _row("Fri Heresy", "Fri", "5:00 PM", sort=5),
+    ]
+    
+    # Sort using current_weekly_rows (simulating what build_week_board_items does)
+    sorted_rows = current_weekly_rows(shuffled, TZ, NOW)
+    embed = build_weekly_embed(sorted_rows, None, TZ)
+    lines = embed.description.split("\n")[1:]  # skip subtitle
+    
+    # Extract day prefix from each line
+    days_in_order = []
+    for line in lines:
+        if line.strip():
+            # Extract the day text (e.g., "Mon & Thu", "Tue", "Wed", etc.)
+            parts = line.split(" · ")
+            if parts:
+                days_in_order.append(parts[0])
+    
+    # Verify chronological order: Mon, Tue, Wed, Thu (as part of Mon & Thu), Fri x2, Sun
+    assert "Mon & Thu" in days_in_order[0]
+    assert "Tue" in days_in_order[1]
+    assert "Wed" in days_in_order[2]
+    assert "Fri" in days_in_order[3]
+    assert "Fri" in days_in_order[4]
+    assert "Sun" in days_in_order[5]
+
+
+def test_extract_weekday_index():
+    """Test weekday extraction from days_text."""
+    from src.services.weekly_service import _extract_weekday_index
+    
+    # Test short names (case-insensitive)
+    assert _extract_weekday_index("Mon") == 0
+    assert _extract_weekday_index("MON") == 0
+    assert _extract_weekday_index("Tue") == 1
+    assert _extract_weekday_index("tue") == 1
+    assert _extract_weekday_index("Wed") == 2
+    assert _extract_weekday_index("Thu") == 3
+    assert _extract_weekday_index("Fri") == 4
+    assert _extract_weekday_index("Sat") == 5
+    assert _extract_weekday_index("Sun") == 6
+    
+    # Test full names
+    assert _extract_weekday_index("Monday") == 0
+    assert _extract_weekday_index("Friday") == 4
+    assert _extract_weekday_index("Sunday") == 6
+    
+    # Test compound days (earliest wins)
+    assert _extract_weekday_index("Mon & Thu") == 0  # Mon is 0
+    assert _extract_weekday_index("Thu & Mon") == 0  # Mon is 0
+    assert _extract_weekday_index("Wed & Fri") == 2  # Wed is 2
+    
+    # Test unrecognizable (should sort last)
+    assert _extract_weekday_index("unknown") == 7
+    assert _extract_weekday_index("") == 7
+    assert _extract_weekday_index("TBA") == 7
 
 
 def _keys(items):

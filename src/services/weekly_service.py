@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -7,12 +9,29 @@ from src.db.repositories import get_or_create_config
 # (title, days_text, time_text, ends_on)
 _DEFAULT_ROWS: list[tuple[str, str, str, str | None]] = [
     ("DND Fremantle", "Mon & Thu", "6:00 PM", None),
+    ("Mordheim: The Cursed City Campaign", "Tue", "6:00 PM", "2026-12-09"),
     ("Tabletop Freo — TCGs, Wargames & Board Games", "Wed", "4:00 PM", None),
-    ("MTG Casual Commander", "Sun", "11:00 AM", None),
     ("Warhammer: The Old World — Friday Night Battle March (600 pts)", "Fri", "5:00 PM", None),
     ("Warhammer: The Horus Heresy — Heresy Fight Night (casual)", "Fri", "5:00 PM", None),
-    ("Mordheim: The Cursed City Campaign", "Tue", "6:00 PM", "2026-12-09"),
+    ("MTG Casual Commander", "Sun", "11:00 AM", None),
 ]
+
+_DAY_NAMES = {
+    "mon": 0, "monday": 0,
+    "tue": 1, "tuesday": 1,
+    "wed": 2, "wednesday": 2,
+    "thu": 3, "thursday": 3,
+    "fri": 4, "friday": 4,
+    "sat": 5, "saturday": 5,
+    "sun": 6, "sunday": 6,
+}
+
+
+def _extract_weekday_index(days_text: str) -> int:
+    """Extract the earliest weekday index from days_text (0=Mon, 6=Sun). Returns 7 if no day found."""
+    words = re.findall(r"\b(\w+)\b", days_text.lower())
+    indices = [_DAY_NAMES[w] for w in words if w in _DAY_NAMES]
+    return min(indices) if indices else 7
 
 
 def seed_weekly_recurring(session: Session, guild_id: int) -> int:
