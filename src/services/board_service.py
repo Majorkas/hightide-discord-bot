@@ -101,7 +101,7 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
     if post and post.channel_id == channel.id:
         try:
             msg = await channel.fetch_message(post.message_id)
-        except (discord.NotFound, discord.Forbidden):
+        except discord.NotFound:
             log.info("board message missing for %s, recreating", board_type)
 
     # Check if this is a period rollover for this_month
@@ -113,7 +113,7 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
 
         try:
             await msg.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        except (discord.NotFound, discord.Forbidden):
+        except discord.NotFound:
             log.info("board message missing for %s, recreating", board_type)
         else:
             save_board_post(session, guild_id, board_type, key,
@@ -163,5 +163,31 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
 
     # Send new message (no existing post or edit failed)
     msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-    save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)
+    try:
+        save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)
+    except Exception:
+        log.exception("saving new board post failed for %s; removing new message", board_type)
+        try:
+            await msg.delete()
+        except Exception:
+            log.exception("cleanup of unsaved board message failed for %s", board_type)
+        raise
     return "created"
+
+
+async def delete_board(bot, session: Session, guild_id: int, board_type: str) -> str:
+    """Delete the stored board message (bot-authored only) and its row, under the board lock."""
+    async with _get_board_lock(guild_id, board_type):
+        post = get_board_post(session, guild_id, board_type)
+        if post is None:
+            return "not_found"
+        try:
+            channel = bot.get_channel(post.channel_id) or await bot.fetch_channel(post.channel_id)
+            msg = await channel.fetch_message(post.message_id)
+            if msg.author.id == bot.user.id:
+                await msg.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass  # Already gone or no permission
+        session.delete(post)
+        session.commit()
+        return "deleted"

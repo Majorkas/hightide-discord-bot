@@ -32,7 +32,7 @@ def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
             if source_url is not None:
                 data["source_url"] = source_url
             _, was_created, changed = upsert_event(session, guild_id, data)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, AttributeError):
             pid = product.get("id") if isinstance(product, dict) else None
             log.exception("failed to process product id=%s", pid)
             session.rollback()

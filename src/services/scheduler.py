@@ -21,6 +21,12 @@ _MAX_RETRY_DELAY = timedelta(hours=2)
 # Created lazily; tests can monkeypatch or reset to None.
 _session_factory = None
 
+_refresh_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_refresh_lock(guild_id: int) -> asyncio.Lock:
+    return _refresh_locks.setdefault(guild_id, asyncio.Lock())
+
 
 def _get_session_factory():
     global _session_factory
@@ -52,6 +58,11 @@ def _in_run_window(daily_hhmm: str, now: datetime) -> bool:
 
 
 async def run_daily_refresh(bot, guild_id: int, *, fetch: bool = True) -> dict:
+    async with _get_refresh_lock(guild_id):
+        return await _run_daily_refresh_locked(bot, guild_id, fetch=fetch)
+
+
+async def _run_daily_refresh_locked(bot, guild_id: int, *, fetch: bool) -> dict:
     with _get_session_factory()() as session:
         cfg = get_or_create_config(session, guild_id)
         tz = ZoneInfo(cfg.timezone)
@@ -62,6 +73,7 @@ async def run_daily_refresh(bot, guild_id: int, *, fetch: bool = True) -> dict:
                 )
             except Exception as e:
                 log.exception("event refresh failed")
+                session.rollback()
                 events = f"error:{type(e).__name__}"
         else:
             events = "cached"
@@ -71,6 +83,7 @@ async def run_daily_refresh(bot, guild_id: int, *, fetch: bool = True) -> dict:
                 result[board_type] = await upsert_board(bot, session, guild_id, board_type)
             except Exception as e:
                 log.exception("board upsert failed for %s", board_type)
+                session.rollback()
                 result[board_type] = f"error:{type(e).__name__}"
         log.info("daily refresh: %s", result)
         return result
@@ -150,5 +163,6 @@ class RefreshScheduler:
                         await self._tick_guild(session, guild_id)
                     except Exception:
                         log.exception("scheduler tick failed for guild %s", guild_id)
+                        session.rollback()
         except Exception:
             log.exception("scheduler tick failed")

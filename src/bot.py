@@ -1,11 +1,15 @@
-import logging
+from dotenv import load_dotenv
 
-import discord
-from discord.ext import commands
+load_dotenv()  # must run before src.config reads the environment
 
-from src import config
-from src.db.models import Base
-from src.db.session import get_engine
+import logging  # noqa: E402
+
+import discord  # noqa: E402
+from discord.ext import commands  # noqa: E402
+
+from src import config  # noqa: E402
+from src.db.models import Base  # noqa: E402
+from src.db.session import get_engine  # noqa: E402
 
 log = logging.getLogger("hightide")
 
@@ -48,6 +52,8 @@ def create_bot() -> commands.Bot:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    if not config.DISCORD_TOKEN:
+        raise SystemExit("DISCORD_TOKEN is not set — copy .env.example to .env and fill it in")
     bot = create_bot()
     bot.run(config.DISCORD_TOKEN)
 

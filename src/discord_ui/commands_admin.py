@@ -163,13 +163,20 @@ class AdminCog(commands.Cog):
         from src.discord_ui.embeds import build_board_embed
         from src.services.board_service import filter_events_for_board
 
-        with _session() as session:
-            cfg = get_or_create_config(session, interaction.guild_id)
-            tz = ZoneInfo(cfg.timezone)
-            events = filter_events_for_board(
-                get_active_events(session, interaction.guild_id), board_type, cfg, tz)
-            embed = build_board_embed(events, board_type.replace("_", " ").title(),
-                                      tz, cfg.include_tba_section)
+        try:
+            with _session() as session:
+                cfg = get_or_create_config(session, interaction.guild_id)
+                tz = ZoneInfo(cfg.timezone)
+                events = filter_events_for_board(
+                    get_active_events(session, interaction.guild_id), board_type, cfg, tz)
+                embed = build_board_embed(events, board_type.replace("_", " ").title(),
+                                          tz, cfg.include_tba_section)
+        except Exception as e:
+            import logging
+            logging.getLogger("hightide").exception("board preview failed")
+            await interaction.response.send_message(
+                f"Preview failed: {type(e).__name__}", ephemeral=True)
+            return
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @board_group.command(name="refresh")
@@ -195,23 +202,10 @@ class AdminCog(commands.Cog):
     async def board_recreate(self, interaction: discord.Interaction,
                              board_type: str) -> None:
         await interaction.response.defer(ephemeral=True)
-        from src.db.repositories import get_board_post
-        from src.services.board_service import upsert_board
+        from src.services.board_service import delete_board, upsert_board
         try:
             with _session() as session:
-                post = get_board_post(session, interaction.guild_id, board_type)
-                if post:
-                    # Best-effort delete of the old Discord message (bot-authored only)
-                    try:
-                        channel = (self.bot.get_channel(post.channel_id)
-                                   or await self.bot.fetch_channel(post.channel_id))
-                        msg = await channel.fetch_message(post.message_id)
-                        if msg.author.id == self.bot.user.id:
-                            await msg.delete()
-                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                        pass  # Already gone or no permission
-                    session.delete(post)
-                    session.commit()
+                await delete_board(self.bot, session, interaction.guild_id, board_type)
                 action = await upsert_board(self.bot, session, interaction.guild_id, board_type)
         except Exception as e:
             import logging

@@ -9,6 +9,7 @@ dependencies = [
     "SQLAlchemy>=2.0",
     "python-dateutil>=2.9",
     "tenacity>=8.2",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
