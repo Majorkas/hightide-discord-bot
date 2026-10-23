@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from src.db.models import Event
-from src.services.board_service import filter_events_for_board, period_key, render_board_hash
+from src.services.board_service import _window, filter_events_for_board, period_key, render_board_hash
 
 TZ = ZoneInfo("Australia/Perth")
 
@@ -112,6 +112,60 @@ def test_today_start_vs_now_discrimination():
     ev = [_ev_at("morning", _at(2026, 10, 23, 10, 0))]
     assert _titles(ev, "this_week", now, _cfg(week_start_mode="today_start")) == {"morning"}
     assert _titles(ev, "this_week", now, _cfg(week_start_mode="now")) == set()
+
+
+# --- monday mode: current calendar week, past days dropped ---
+
+MON = _cfg(week_start_mode="monday")
+
+
+def test_monday_mode_wednesday_shows_wed_to_sunday():
+    now = _at(2026, 10, 28, 15, 0)  # Wednesday
+    events = [
+        _ev_at("tue", _at(2026, 10, 27, 20, 0)),
+        _ev_at("wed_morning", _at(2026, 10, 28, 9, 0)),
+        _ev_at("sun_late", _at(2026, 11, 1, 23, 59)),
+        _ev_at("next_mon_midnight", _at(2026, 11, 2, 0, 0)),
+    ]
+    assert _titles(events, "this_week", now, MON) == {"wed_morning", "sun_late"}
+
+
+def test_monday_mode_monday_shows_full_week():
+    now = _at(2026, 10, 26, 10, 0)  # Monday
+    events = [
+        _ev_at("sun_before", _at(2026, 10, 25, 23, 59)),
+        _ev_at("mon_start", _at(2026, 10, 26, 0, 0)),
+        _ev_at("sun_end", _at(2026, 11, 1, 23, 59)),
+        _ev_at("next_mon", _at(2026, 11, 2, 0, 0)),
+    ]
+    assert _titles(events, "this_week", now, MON) == {"mon_start", "sun_end"}
+
+
+def test_monday_mode_sunday_shows_sunday_only():
+    now = _at(2026, 11, 1, 12, 0)  # Sunday
+    events = [
+        _ev_at("sat", _at(2026, 10, 31, 20, 0)),
+        _ev_at("sun", _at(2026, 11, 1, 18, 0)),
+        _ev_at("mon", _at(2026, 11, 2, 0, 0)),
+    ]
+    assert _titles(events, "this_week", now, MON) == {"sun"}
+
+
+def test_monday_mode_window_bounds_span_month_end():
+    now = _at(2026, 10, 28, 15, 0)
+    start, end = _window("this_week", MON, TZ, now=now)
+    assert start == _at(2026, 10, 28, 0, 0)
+    assert end == _at(2026, 11, 2, 0, 0)
+
+
+def test_monday_mode_period_key_matches_iso_week():
+    now = _at(2026, 10, 28, 15, 0)
+    start, end = _window("this_week", MON, TZ, now=now)
+    key = period_key("this_week", TZ, now=now)
+    iso = now.isocalendar()
+    assert key == f"{iso.year}-W{iso.week:02d}"
+    assert period_key("this_week", TZ, now=end - timedelta(seconds=1)) == key
+    assert period_key("this_week", TZ, now=end) != key
 
 
 def test_period_key_with_fixed_now():

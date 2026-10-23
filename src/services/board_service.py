@@ -25,6 +25,11 @@ def _get_board_lock(guild_id: int, board_type: str) -> asyncio.Lock:
 def _window(board_type: str, cfg, tz, *, now: datetime | None = None) -> tuple[datetime, datetime]:
     now = now or datetime.now(tz)
     if board_type == "this_week":
+        if cfg.week_start_mode == "monday":
+            today = datetime.combine(now.date(), time.min, tzinfo=tz)
+            monday = datetime.combine(now.date() - timedelta(days=now.weekday()), time.min, tzinfo=tz)
+            # Wall-clock arithmetic: next Monday is 00:00 local even across DST changes.
+            return max(today, monday), monday + timedelta(days=7)
         if cfg.week_start_mode == "today_start":
             start = datetime.combine(now.date(), time.min, tzinfo=tz)
         else:

@@ -20,6 +20,7 @@ def test_config_defaults(session):
     assert cfg.timezone == "Australia/Perth"
     assert cfg.daily_refresh_time == "09:00"
     assert cfg.include_tba_section is True
+    assert cfg.week_start_mode == "monday"
 
 
 def test_get_or_create_config_idempotent(session):

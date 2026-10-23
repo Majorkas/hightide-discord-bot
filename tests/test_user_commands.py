@@ -79,3 +79,64 @@ async def test_events_upcoming_failure_is_ephemeral(db, cog, interaction, monkey
     assert args[0] == "Could not load events right now — try again later."
     assert "RuntimeError" not in args[0]
     assert "db down" not in args[0]
+
+
+def _seed(db, events, **cfg_kw):
+    with db() as s:
+        s.add(GuildConfig(guild_id=GUILD, timezone="Australia/Perth", **cfg_kw))
+        for e in events:
+            s.add(e)
+        s.commit()
+
+
+def _ev(title, starts_at, guild=GUILD):
+    return Event(guild_id=guild, external_id=f"wp:{title}", title=title,
+                 url="https://example.com", starts_at=starts_at,
+                 time_known=True, is_active=True)
+
+
+async def _embed_text(cog, interaction):
+    await cog.events_upcoming.callback(cog, interaction)
+    _, kwargs = interaction.response.send_message.call_args
+    embed = kwargs["embed"]
+    return " ".join(f"{f.name} {f.value}" for f in embed.fields)
+
+
+async def test_events_upcoming_is_unwindowed_from_today(db, cog, interaction):
+    tz = ZoneInfo("Australia/Perth")
+    now = datetime.now(tz)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    _seed(db, [
+        _ev("YesterdayEvt", now - timedelta(days=1)),
+        _ev("TodayEvt", today_start),
+        _ev("ThreeWeeksEvt", now + timedelta(weeks=3)),
+    ])
+    text = await _embed_text(cog, interaction)
+    assert "TodayEvt" in text
+    assert "ThreeWeeksEvt" in text
+    assert "YesterdayEvt" not in text
+
+
+async def test_events_upcoming_tba_only_when_enabled(db, cog, interaction):
+    _seed(db, [_ev("UndatedEvt", None)], include_tba_section=True)
+    assert "UndatedEvt" in await _embed_text(cog, interaction)
+
+
+async def test_events_upcoming_tba_hidden_when_disabled(db, cog, interaction):
+    _seed(db, [_ev("UndatedEvt", None)], include_tba_section=False)
+    assert "UndatedEvt" not in await _embed_text(cog, interaction)
+
+
+async def test_events_upcoming_ignores_week_start_mode(db, cog, interaction):
+    tz = ZoneInfo("Australia/Perth")
+    _seed(db, [_ev("FarEvt", datetime.now(tz) + timedelta(days=30))],
+          week_start_mode="now")
+    assert "FarEvt" in await _embed_text(cog, interaction)
+
+
+async def test_events_upcoming_guild_isolation(db, cog, interaction):
+    tz = ZoneInfo("Australia/Perth")
+    soon = datetime.now(tz) + timedelta(days=2)
+    _seed(db, [_ev("Mine", soon), _ev("Theirs", soon, guild=GUILD + 1)])
+    text = await _embed_text(cog, interaction)
+    assert "Mine" in text and "Theirs" not in text

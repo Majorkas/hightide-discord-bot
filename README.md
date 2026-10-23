@@ -1,15 +1,15 @@
 # Hightide Discord Events Bot
 
-A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop's WordPress store and maintains two persistent event boards: a rolling 7-day week view and a current-month calendar view.
+A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop's WordPress store and maintains two persistent event boards: a current-week view (Mon–Sun, starting from today) and a current-month calendar view.
 
 ## Features
 
 - **Automated event scraping**: Fetches events from WordPress REST API daily at 09:00 Australia/Perth
 - **Two persistent boards**: 
-  - `#this-week` — rolling 7-day view
+  - `#this-week` — the current week (Mon–Sun), starting from today
   - `#this-month` — current calendar month view (auto-rotates at month boundaries)
 - **Smart event management**: Deduplication by fingerprint, stale-event detection, automatic TBA fallback for missing dates
-- **User commands**: `/events upcoming` shows events from today through the next 7 days in an ephemeral message
+- **User commands**: `/events upcoming` shows all events from today onward, plus date-TBA events, in an ephemeral message
 - **Admin control**: Configure channels, timezone, refresh time, and event sources per server
 
 ## Setup
@@ -103,7 +103,7 @@ python -m pytest tests/test_normalize.py::test_parse_dot_prefix_two_digit_year -
 All admin commands require the **Manage Guild** permission.
 
 **`/config this_week_channel <#channel>`**
-- Sets the Discord channel where the 7-day board posts.
+- Sets the Discord channel where the current-week board (Mon–Sun, starting from today) posts.
 
 **`/config this_month_channel <#channel>`**
 - Sets the Discord channel where the monthly board posts.
@@ -142,7 +142,7 @@ All admin commands require the **Manage Guild** permission.
 ### User Commands
 
 **`/events upcoming`**
-- Shows events from today through the next 7 days in an ephemeral message.
+- Shows all events from today onward, plus date-TBA events, in an ephemeral message.
 - No permissions required beyond View Channels and Embed Links.
 
 ## Discord Permissions
@@ -159,7 +159,7 @@ Add the bot to your server with the following permissions:
 
 **Invite URL template**:
 ```
-https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=93184&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=1563111587500400660&permissions=93184&scope=bot%20applications.commands
 ```
 
 (Adjust the `permissions` parameter if you enable additional features.)

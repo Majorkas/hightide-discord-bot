@@ -43,7 +43,7 @@ class GuildConfig(Base):
     this_week_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     this_month_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     daily_refresh_time: Mapped[str] = mapped_column(String, default="09:00")
-    week_start_mode: Mapped[str] = mapped_column(String, default="today_start")
+    week_start_mode: Mapped[str] = mapped_column(String, default="monday")
     include_tba_section: Mapped[bool] = mapped_column(Boolean, default=True)
     delete_previous_month_message: Mapped[bool] = mapped_column(Boolean, default=True)
 

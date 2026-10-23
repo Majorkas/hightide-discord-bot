@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import discord
@@ -10,7 +11,6 @@ from src import config
 from src.db.repositories import get_active_events, get_or_create_config
 from src.db.session import get_session_factory
 from src.discord_ui.embeds import build_board_embed
-from src.services.board_service import filter_events_for_board
 
 log = logging.getLogger("hightide")
 
@@ -33,15 +33,18 @@ class UserCog(commands.Cog):
         name="events", description="Hightide events", guild_only=True,
     )
 
-    @events_group.command(name="upcoming", description="Events happening this week")
+    @events_group.command(name="upcoming", description="All upcoming events")
     async def events_upcoming(self, interaction: discord.Interaction) -> None:
         try:
             with _session() as session:
                 cfg = get_or_create_config(session, interaction.guild_id)
                 tz = ZoneInfo(cfg.timezone)
-                events = filter_events_for_board(
-                    get_active_events(session, interaction.guild_id),
-                    "this_week", cfg, tz)
+                today_start = datetime.combine(datetime.now(tz).date(), time.min, tzinfo=tz)
+                events = [
+                    e for e in get_active_events(session, interaction.guild_id)
+                    if (e.starts_at is None and cfg.include_tba_section)
+                    or (e.starts_at is not None and e.starts_at.astimezone(tz) >= today_start)
+                ]
                 embed = build_board_embed(events, "Upcoming Events", tz,
                                           cfg.include_tba_section)
         except Exception:

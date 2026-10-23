@@ -14,6 +14,12 @@ def test_models_create_and_insert(session):
     assert session.query(Event).first().external_id == "wp:1"
 
 
+def test_guild_config_week_start_mode_defaults_to_monday(session):
+    session.add(GuildConfig(guild_id=1))
+    session.commit()
+    assert session.get(GuildConfig, 1).week_start_mode == "monday"
+
+
 def test_tz_datetime_round_trip(session):
     """Timezone-aware datetimes round-trip through SQLite correctly."""
     test_time = datetime(2026, 10, 23, 14, 30, 0, tzinfo=timezone.utc)
