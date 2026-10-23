@@ -112,6 +112,32 @@ def test_parse_dot_prefix_invalid_date_month_99():
     assert dt is None and known is False
 
 
+def test_natural_date_rejects_year_as_day_march_2026_sale():
+    # "March 2026 Sale" should not match "March 20" + consume "26" as year
+    dt, known = parse_event_datetime("March 2026 Sale", TZ)
+    assert dt is None and known is False
+
+
+def test_natural_date_rejects_year_as_day_may_1234():
+    # "May 1234" should not match "May 12" + consume "34" as year
+    dt, known = parse_event_datetime("May 1234", TZ)
+    assert dt is None and known is False
+
+
+def test_yearless_natural_date_with_weekday_still_works():
+    # "Saturday November 7th" must still parse (yearless path intact)
+    dt, known = parse_event_datetime("Saturday November 7th", TZ, now=NOW)
+    assert dt is not None and (dt.year, dt.month, dt.day) == (2026, 11, 7)
+    assert known is False
+
+
+def test_natural_date_with_year_still_works():
+    # "Friday October 23rd 2026" must still parse (year-present path intact)
+    dt, known = parse_event_datetime("Friday October 23rd 2026", TZ)
+    assert dt is not None and (dt.year, dt.month, dt.day) == (2026, 10, 23)
+    assert known is False
+
+
 def test_extract_time():
     html = '<p>→ Location: Hightide</p><p>→ Time: 6:30pm</p><p>→ Ticket: $10</p>'
     assert extract_time(html) == "6:30pm"

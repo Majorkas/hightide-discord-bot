@@ -10,7 +10,7 @@ _DOT_PREFIX = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})\b")
 _NATURAL_DATE = re.compile(
     r"((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
     r"(January|February|March|April|May|June|July|August|September|October|"
-    r"November|December)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?",
+    r"November|December)\s+\d{1,2}(?!\d)(?:st|nd|rd|th)?(?:,?\s+(?P<year>\d{4}))?",
     re.IGNORECASE,
 )
 _ROLL_FORWARD_DAYS = 30
