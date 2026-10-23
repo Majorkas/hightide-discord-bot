@@ -221,8 +221,8 @@ async def _delete_stored_messages(bot, channel, message_ids: list[int]) -> None:
             msg = await channel.fetch_message(message_id)
             if msg.author.id == bot.user.id:
                 await msg.delete()
-        except discord.HTTPException:
-            log.info("could not delete board message %s", message_id)
+        except Exception:
+            log.exception("could not delete board message %s", message_id)
 
 
 def _card_hash(e: Event, tz) -> str:
@@ -249,6 +249,44 @@ def _stored_week_set(post) -> tuple[dict[str, tuple[int, str | None]], list[int]
         pass
     # Legacy single multi-embed message (or corrupt state): keep the header, drop the rest.
     return {"header": (ids[0], None)}, ids[1:]
+
+
+def _should_recreate_week_set(stored_keys: list[str], desired_keys: list[str]) -> bool:
+    """
+    Check if we should do a full set recreate (delete all, send fresh) vs. incremental update.
+    
+    Returns True if any kept key would be placed in a different position relative to others,
+    or if new keys would be inserted before all kept keys (not a pure suffix-append).
+    
+    Pure suffix-append rule: new keys can ONLY be added at the end of the kept keys.
+    All kept keys must remain in the same order and position relative to each other.
+    """
+    # Remove header from consideration (it's always first)
+    stored = [k for k in stored_keys if k != "header"]
+    desired = [k for k in desired_keys if k != "header"]
+    
+    # Keys that exist in both stored and desired are "kept"
+    kept = [k for k in stored if k in desired]
+    
+    if not kept:
+        # No overlap: entirely new set or all removed; safe to proceed without recreate
+        return False
+    
+    # Extract kept keys from desired in the order they appear in desired
+    kept_in_desired = [k for k in desired if k in kept]
+    
+    # Check 1: order must be preserved (kept keys same order in both)
+    if kept != kept_in_desired:
+        log.info("week board: kept keys reordered, triggering recreate")
+        return True
+    
+    # Check 2: kept keys must be a contiguous prefix in desired
+    # (i.e., all new keys come only after the last kept key)
+    if kept_in_desired != desired[:len(kept_in_desired)]:
+        log.info("week board: new keys interspersed with kept keys, triggering recreate")
+        return True
+    
+    return False
 
 
 async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events: list[Event],
@@ -279,6 +317,15 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
         except discord.NotFound:
             log.info("board header message missing for this_week, recreating set")
             header_msg = None
+
+    # Order-aware recreate check: if kept keys would be reordered or new keys interspersed,
+    # discard the diff and do a full recreate
+    if header_msg is not None and stored and _should_recreate_week_set(list(stored.keys()), keys):
+        log.info("week board: order mismatch detected, performing full recreate")
+        all_msgs = [mid for k, (mid, _) in stored.items()] + extras
+        await _delete_stored_messages(bot, channel, all_msgs)
+        stored = {}
+        header_msg = None
 
     if header_msg is None:
         if stored:

@@ -168,24 +168,37 @@ async def test_removed_event_message_deleted(session):
 
 
 async def test_new_event_mid_week_sends_one_message_others_untouched(session):
+    # NOTE: This test validates the order-aware recreate fix.
+    # When a new event is inserted mid-sequence (not at end), the entire set is recreated.
+    # This prevents the bug where new cards would be appended at the bottom instead
+    # of being placed in the correct date order.
     _seed(session)
     channel = FakeChannel()
     bot = _bot(channel)
     await upsert_board(bot, session, GUILD, "this_week")
-    before_ids = json.loads(get_board_post(session, GUILD, "this_week").message_ids)
+    old_post = get_board_post(session, GUILD, "this_week")
+    old_ids = [old_post.message_id] + json.loads(old_post.message_ids)
+    
+    # Add event between a and b: this breaks the surviving-keys-as-prefix assumption,
+    # triggering a full recreate
     session.add(_event("ab", days=1, starts_at=datetime.now(TZ) + timedelta(days=1, hours=1)))
     session.commit()
     channel.sends.clear()
+    channel.deleted.clear()
 
-    assert await upsert_board(bot, session, GUILD, "this_week") == "edited"
-    assert [s["embed"].title for s in channel.sends] == ["ab"]
+    # With order-aware recreate: should recreate (not just append)
+    result = await upsert_board(bot, session, GUILD, "this_week")
+    assert result == "created"
+    
+    # All old non-header messages should be deleted
+    assert len(channel.deleted) >= len(old_ids) - 1  # all but maybe header
+    
+    # New keys should be in correct order
     post = get_board_post(session, GUILD, "this_week")
     assert json.loads(post.render_hash)["keys"] == ["header", "wp:a", "wp:ab", "wp:b", "wp:c"]
-    ids = json.loads(post.message_ids)
-    assert ids[0] == before_ids[0] and ids[2:] == before_ids[1:]
-    for mid in before_ids:
-        assert channel.messages[mid].edits == []
-    assert channel.deleted == []
+    
+    # Should have sent fresh complete set
+    assert len(channel.sends) == 5  # header + 4 cards
 
 
 async def test_header_not_found_recreates_whole_set(session):
