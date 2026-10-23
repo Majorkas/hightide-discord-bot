@@ -100,33 +100,16 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
     if post and post.channel_id == channel.id:
         try:
             msg = await channel.fetch_message(post.message_id)
-        except (discord.NotFound, discord.Forbidden):
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             log.info("board message missing for %s, recreating", board_type)
 
-    if msg is not None:
+    # Check if this is a period rollover for this_month
+    is_rollover = post and board_type == "this_month" and is_new_period(board_type, post.period_key, key)
+
+    if msg is not None and not is_rollover:
         if post.render_hash == new_hash and post.period_key == key:
             return "skipped"
-        
-        # Rollover check: if this_month and period changed, recreate instead of edit
-        if board_type == "this_month" and is_new_period(board_type, post.period_key, key):
-            # Month rollover: send new message and optionally delete old one
-            msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            
-            # Delete previous month message if configured
-            if cfg.delete_previous_month_message:
-                try:
-                    old_channel = bot.get_channel(post.channel_id) or await bot.fetch_channel(post.channel_id)
-                    old_msg = await old_channel.fetch_message(post.message_id)
-                    # Apply authorship guard: only delete if bot sent it
-                    if old_msg.author.id == bot.user.id:
-                        await old_msg.delete()
-                except (discord.NotFound, discord.Forbidden):
-                    log.debug("could not delete previous month message for %s", board_type)
-            
-            save_board_post(session, guild_id, board_type, key,
-                            channel.id, msg.id, new_hash)
-            return "recreated"
-        
+
         try:
             await msg.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except (discord.NotFound, discord.Forbidden):
@@ -136,25 +119,28 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
                             channel.id, msg.id, new_hash)
             return "edited"
 
-    # msg is None: either no post exists, or fetch failed
-    # Check if this is a period rollover (even if we couldn't fetch the old message)
-    if post and board_type == "this_month" and is_new_period(board_type, post.period_key, key):
-        # Month rollover with unreachable/missing old message
+    # Handle rollover or send new message
+    if is_rollover:
+        # Month rollover: send new message, save immediately, then optionally delete old one
         msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        
+        # Save before delete to avoid orphaned message if delete fails
+        save_board_post(session, guild_id, board_type, key,
+                        channel.id, msg.id, new_hash)
+
         # Try to delete old message if configured (best effort)
         if cfg.delete_previous_month_message:
             try:
                 old_channel = bot.get_channel(post.channel_id) or await bot.fetch_channel(post.channel_id)
                 old_msg = await old_channel.fetch_message(post.message_id)
+                # Apply authorship guard: only delete if bot sent it
                 if old_msg.author.id == bot.user.id:
                     await old_msg.delete()
-            except (discord.NotFound, discord.Forbidden):
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 log.debug("could not delete previous month message for %s", board_type)
-        
-        save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)
+
         return "recreated"
 
+    # Send new message (no existing post or edit failed)
     msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)
     return "created"

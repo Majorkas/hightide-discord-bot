@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 from zoneinfo import ZoneInfo
@@ -6,10 +5,9 @@ from zoneinfo import ZoneInfo
 import discord
 import pytest
 
-from src.db.models import BoardPost, Event, GuildConfig
+from src.db.models import Event, GuildConfig
 from src.db.repositories import get_board_post
 from src.services.board_service import is_new_period, upsert_board
-from src.services.scheduler import run_daily_refresh
 
 TZ = ZoneInfo("Australia/Perth")
 GUILD = 999
@@ -112,72 +110,79 @@ async def test_month_rollover_recreates_and_deletes_old_message(session):
     """
     Month period change should:
     - Return "recreated"
-    - Send new message with allowed_mentions
-    - Delete old message from stored channel
-    - Update BoardPost with new period_key and message_id
+    - Send new message with allowed_mentions=discord.AllowedMentions.none()
+    - Save BoardPost before attempting delete
+    - Delete old message if delete_previous_month_message=True
     """
     _seed(session)
     month_channel = _channel(222)
-    month_channel.send = AsyncMock(return_value=_message(100))
-    month_channel.fetch_message = AsyncMock(return_value=_message(50, author_id=9999))
-
     bot = _bot(month_channel)
 
     # First call: create initial board post for this_month
+    month_channel.send = AsyncMock(return_value=_message(100))
+    month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
+
     result1 = await upsert_board(bot, session, GUILD, "this_month")
     assert result1 == "created"
 
     post1 = get_board_post(session, GUILD, "this_month")
     assert post1.message_id == 100
-    assert post1.period_key is not None
-    original_period_key = post1.period_key
 
-    # Simulate month change: update the period_key to next month
-    # We'll manually set it to simulate next month
-    post1.period_key = "2026-09"  # Stored old month
+    # Simulate month change: update stored period_key to old month
+    post1.period_key = "2026-09"
     session.commit()
 
-    # Clear the mock call counts
+    # Reset mocks for second call
     month_channel.send.reset_mock()
     month_channel.fetch_message.reset_mock()
 
-    # Second call: with same content but different month (new current key)
-    # We need to patch period_key to return a different key
+    # Create new message and old message mocks for rollover
+    old_msg = _message(100, author_id=9999)
+    new_msg = _message(200)
+    month_channel.fetch_message = AsyncMock(return_value=old_msg)
+    month_channel.send = AsyncMock(return_value=new_msg)
+
     from unittest.mock import patch
 
     with patch("src.services.board_service.period_key", return_value="2026-10"):
-        month_channel.send = AsyncMock(return_value=_message(200))
         result2 = await upsert_board(bot, session, GUILD, "this_month")
 
     assert result2 == "recreated"
 
-    # Check new board post
+    # Verify send was called with allowed_mentions
+    assert month_channel.send.call_count == 1
+    call_kwargs = month_channel.send.call_args.kwargs
+    assert isinstance(call_kwargs.get("allowed_mentions"), discord.AllowedMentions)
+    assert call_kwargs.get("allowed_mentions").everyone is False
+    assert call_kwargs.get("allowed_mentions").users is False
+    assert call_kwargs.get("allowed_mentions").roles is False
+
+    # Verify old message delete was awaited
+    old_msg.delete.assert_awaited_once()
+
+    # Verify new board post points to new message
     post2 = get_board_post(session, GUILD, "this_month")
     assert post2.message_id == 200
     assert post2.period_key == "2026-10"
 
-    # Verify fetch_message was called (twice: once for skip check, once for delete)
-    assert month_channel.fetch_message.call_count >= 1
-
 
 async def test_month_rollover_respects_delete_previous_month_message_false(session):
     """
-    When delete_previous_month_message=False, old message should NOT be deleted
-    but recreated logic still applies.
+    When delete_previous_month_message=False, old message should NOT be deleted.
     """
     _seed(session, delete_previous_month_message=False)
     month_channel = _channel(222)
-    month_channel.send = AsyncMock(return_value=_message(100))
-    month_channel.fetch_message = AsyncMock(return_value=_message(50, author_id=9999))
-
     bot = _bot(month_channel)
 
-    # Create initial
+    # First call: create initial
+    month_channel.send = AsyncMock(return_value=_message(100))
+    month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
+
     result1 = await upsert_board(bot, session, GUILD, "this_month")
     assert result1 == "created"
 
     post1 = get_board_post(session, GUILD, "this_month")
-    original_msg_id = post1.message_id
+    assert post1.message_id == 100
 
     # Simulate month change
     post1.period_key = "2026-09"
@@ -185,18 +190,24 @@ async def test_month_rollover_respects_delete_previous_month_message_false(sessi
 
     month_channel.send.reset_mock()
     month_channel.fetch_message.reset_mock()
-    month_channel.fetch_message = AsyncMock(return_value=_message(50, author_id=9999))
+
+    # Create mocks for rollover
+    old_msg = _message(100, author_id=9999)
+    new_msg = _message(200)
+    month_channel.fetch_message = AsyncMock(return_value=old_msg)
+    month_channel.send = AsyncMock(return_value=new_msg)
 
     from unittest.mock import patch
 
     with patch("src.services.board_service.period_key", return_value="2026-10"):
-        month_channel.send = AsyncMock(return_value=_message(200))
         result2 = await upsert_board(bot, session, GUILD, "this_month")
 
     assert result2 == "recreated"
 
-    # fetch_message should NOT have been called for delete (only for skip check)
-    # Actually, it will be called once for skip check, but not for delete
+    # Verify old message delete was NOT awaited
+    old_msg.delete.assert_not_called()
+
+    # Verify new board post
     post2 = get_board_post(session, GUILD, "this_month")
     assert post2.message_id == 200
 
@@ -308,70 +319,134 @@ async def test_this_week_period_change_does_not_trigger_rollover(session):
     msg.edit.assert_called_once()
 
 
+async def test_month_rollover_skips_delete_for_foreign_author(session):
+    """
+    Old message sent by different author: should NOT be deleted (authorship guard).
+    """
+    _seed(session)
+    month_channel = _channel(222)
+    bot = _bot(month_channel)
+
+    # First call
+    month_channel.send = AsyncMock(return_value=_message(100))
+    month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
+
+    result1 = await upsert_board(bot, session, GUILD, "this_month")
+    assert result1 == "created"
+
+    post1 = get_board_post(session, GUILD, "this_month")
+    post1.period_key = "2026-09"
+    session.commit()
+
+    month_channel.send.reset_mock()
+    month_channel.fetch_message.reset_mock()
+
+    # Create old message with different author
+    old_msg = _message(100, author_id=8888)  # Different author, not the bot
+    new_msg = _message(200)
+    month_channel.fetch_message = AsyncMock(return_value=old_msg)
+    month_channel.send = AsyncMock(return_value=new_msg)
+
+    from unittest.mock import patch
+
+    with patch("src.services.board_service.period_key", return_value="2026-10"):
+        result2 = await upsert_board(bot, session, GUILD, "this_month")
+
+    assert result2 == "recreated"
+
+    # Old message delete should NOT have been awaited (authorship guard)
+    old_msg.delete.assert_not_called()
+
+    post2 = get_board_post(session, GUILD, "this_month")
+    assert post2.message_id == 200
+
+
+async def test_month_rollover_delete_attempts_on_stored_channel(session):
+    """
+    Rollover delete logic attempts to fetch from the stored channel (post.channel_id).
+    """
+    _seed(session)
+    month_channel = _channel(222)
+    bot = _bot(month_channel)
+
+    # First call
+    month_channel.send = AsyncMock(return_value=_message(100))
+    month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
+
+    result1 = await upsert_board(bot, session, GUILD, "this_month")
+    assert result1 == "created"
+
+    post1 = get_board_post(session, GUILD, "this_month")
+    post1.period_key = "2026-09"
+    session.commit()
+
+    month_channel.send.reset_mock()
+    month_channel.fetch_message.reset_mock()
+
+    # Create old message
+    old_msg = _message(100, author_id=9999)
+    new_msg = _message(200)
+    month_channel.fetch_message = AsyncMock(return_value=old_msg)
+    month_channel.send = AsyncMock(return_value=new_msg)
+
+    from unittest.mock import patch
+
+    with patch("src.services.board_service.period_key", return_value="2026-10"):
+        result2 = await upsert_board(bot, session, GUILD, "this_month")
+
+    assert result2 == "recreated"
+
+    # Verify the old message's delete was attempted
+    old_msg.delete.assert_awaited_once()
+
+    post2 = get_board_post(session, GUILD, "this_month")
+    assert post2.message_id == 200
+
+
+async def test_month_rollover_handles_http_exception_on_fetch(session):
+    """
+    fetch_message raises HTTPException (e.g., network error).
+    Should still recreate successfully with BoardPost pointing at NEW message.
+    """
+    _seed(session)
+    month_channel = _channel(222)
+    bot = _bot(month_channel)
+
+    # First call
+    month_channel.send = AsyncMock(return_value=_message(100))
+    month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
+
+    result1 = await upsert_board(bot, session, GUILD, "this_month")
+    assert result1 == "created"
+
+    post1 = get_board_post(session, GUILD, "this_month")
+    post1.period_key = "2026-09"
+    session.commit()
+
+    month_channel.send.reset_mock()
+
+    # fetch_message raises HTTPException
+    month_channel.fetch_message = AsyncMock(
+        side_effect=_http_exc(discord.HTTPException, 500)
+    )
+    new_msg = _message(200)
+    month_channel.send = AsyncMock(return_value=new_msg)
+
+    from unittest.mock import patch
+
+    with patch("src.services.board_service.period_key", return_value="2026-10"):
+        result2 = await upsert_board(bot, session, GUILD, "this_month")
+
+    assert result2 == "recreated"
+
+    # BoardPost already points at new message (save-before-delete)
+    post2 = get_board_post(session, GUILD, "this_month")
+    assert post2.message_id == 200
+    assert post2.period_key == "2026-10"
+
+
 # ============================================================================
 # Tests for scheduler retry logic
 # ============================================================================
+# Scheduler tests moved to tests/test_scheduler.py for better organization
 
-
-async def test_scheduler_does_not_set_last_run_key_on_refresh_error(session):
-    """
-    When run_daily_refresh returns error in events, _last_run_key should not be set.
-    """
-    from src.services.scheduler import RefreshScheduler
-
-    _seed(session)
-
-    bot = AsyncMock()
-    scheduler = RefreshScheduler(bot)
-    scheduler.bot.wait_until_ready = AsyncMock()
-    scheduler.bot.user = MagicMock()
-    type(scheduler.bot.user).id = PropertyMock(return_value=9999)
-
-    # Mock run_daily_refresh to return an error
-    from unittest.mock import patch
-
-    error_result = {
-        "events": "error:ValueError",
-        "this_week": "created",
-        "this_month": "created",
-    }
-    with patch(
-        "src.services.scheduler.run_daily_refresh", return_value=error_result
-    ):
-        await scheduler.tick()
-
-    # _last_run_key should remain None (not set)
-    # Actually, since we're testing the scheduler, we need to set up config properly
-    # This test is complex; let me create a simpler test that directly tests the retry logic
-
-
-async def test_scheduler_sets_last_run_key_on_full_success(session):
-    """
-    When run_daily_refresh returns no errors, _last_run_key should be set.
-    """
-    from src.services.scheduler import RefreshScheduler
-
-    _seed(session)
-
-    bot = AsyncMock()
-    scheduler = RefreshScheduler(bot)
-
-    # Mock run_daily_refresh to return all success
-    from unittest.mock import patch
-
-    success_result = {
-        "events": [{"title": "event1"}],
-        "this_week": "edited",
-        "this_month": "edited",
-    }
-    with patch(
-        "src.services.scheduler.run_daily_refresh", return_value=success_result
-    ):
-        with patch("src.services.scheduler._now") as mock_now:
-            mock_now.return_value = datetime(2026, 10, 23, 9, 0, tzinfo=TZ)
-            # Manually check logic
-            result = success_result
-            has_error = any(
-                isinstance(v, str) and v.startswith("error:") for v in result.values()
-            )
-            assert not has_error, "Should have no errors"
