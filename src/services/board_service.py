@@ -123,6 +123,9 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
     if is_rollover:
         # Month rollover: send new message, save immediately, then optionally delete old one
         msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        # Save old channel_id and message_id before updating post (for proper cleanup)
+        old_channel_id = post.channel_id
+        old_message_id = post.message_id
         # Save before delete to avoid orphaned message if delete fails
         save_board_post(session, guild_id, board_type, key,
                         channel.id, msg.id, new_hash)
@@ -130,8 +133,8 @@ async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type:
         # Try to delete old message if configured (best effort)
         if cfg.delete_previous_month_message:
             try:
-                old_channel = bot.get_channel(post.channel_id) or await bot.fetch_channel(post.channel_id)
-                old_msg = await old_channel.fetch_message(post.message_id)
+                old_channel = bot.get_channel(old_channel_id) or await bot.fetch_channel(old_channel_id)
+                old_msg = await old_channel.fetch_message(old_message_id)
                 # Apply authorship guard: only delete if bot sent it
                 if old_msg.author.id == bot.user.id:
                     await old_msg.delete()

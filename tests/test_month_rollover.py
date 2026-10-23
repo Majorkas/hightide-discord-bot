@@ -363,56 +363,114 @@ async def test_month_rollover_skips_delete_for_foreign_author(session):
 
 async def test_month_rollover_delete_attempts_on_stored_channel(session):
     """
-    Rollover delete logic fetches and deletes the old message from the stored channel.
+    Rollover delete logic fetches and deletes the old message from the stored channel (111),
+    while sending the new message to the configured channel (222).
+    This test discriminates: if upsert_board used the configured channel for delete,
+    stored_channel.fetch_message would never be awaited and assertions would fail.
     """
-    _seed(session)
-    month_channel = _channel(222)
-    bot = _bot(month_channel)
-
-    # First call: create initial post
-    month_channel.send = AsyncMock(return_value=_message(100))
-    month_channel.fetch_message = AsyncMock(return_value=_message(100, author_id=9999))
-
-    result1 = await upsert_board(bot, session, GUILD, "this_month")
-    assert result1 == "created"
-
-    post1 = get_board_post(session, GUILD, "this_month")
-    post1.period_key = "2026-09"
+    from src.db.models import BoardPost, GuildConfig, Event
+    from unittest.mock import patch
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    
+    # Create config with this_month_channel_id = 222 and delete_previous_month_message = True
+    cfg = GuildConfig(
+        guild_id=GUILD,
+        timezone="Australia/Perth",
+        this_week_channel_id=111,
+        this_month_channel_id=222,
+        daily_refresh_time="09:00",
+        week_start_mode="today_start",
+        include_tba_section=True,
+        delete_previous_month_message=True,  # EXPLICITLY True
+    )
+    session.add(cfg)
+    session.add(
+        Event(
+            guild_id=GUILD,
+            external_id="wp:e1",
+            title="e1",
+            url="https://x",
+            starts_at=datetime.now(ZoneInfo("Australia/Perth")) + timedelta(hours=1),
+            time_known=True,
+            is_active=True,
+        )
+    )
     session.commit()
-
-    month_channel.send.reset_mock()
-    month_channel.fetch_message.reset_mock()
-
-    # Second call: rollover (period changed)
+    
+    # Manually create a BoardPost with channel_id=111 (stored channel) to simulate
+    # admin having reconfigured channels mid-month
+    post = BoardPost(
+        guild_id=GUILD,
+        board_type="this_month",
+        channel_id=111,  # Stored on old channel
+        message_id=100,
+        period_key="2026-09",  # Last month (old)
+        render_hash="old_hash",
+    )
+    session.add(post)
+    session.commit()
+    
+    # Verify post was created with correct channel_id
+    retrieved_post = get_board_post(session, GUILD, "this_month")
+    assert retrieved_post.channel_id == 111, f"Expected channel_id=111, got {retrieved_post.channel_id}"
+    
+    # Create two distinct channel mocks
+    stored_channel = _channel(111)
+    configured_channel = _channel(222)
+    
+    # Create bot with get_channel/fetch_channel returning the right channel per ID
+    bot = AsyncMock()
+    bot.user = MagicMock()
+    type(bot.user).id = PropertyMock(return_value=9999)
+    
+    def get_channel_impl(cid):
+        return stored_channel if cid == 111 else (configured_channel if cid == 222 else None)
+    
+    async def fetch_channel_impl(cid):
+        return stored_channel if cid == 111 else configured_channel
+    
+    bot.get_channel = MagicMock(side_effect=get_channel_impl)
+    bot.fetch_channel = AsyncMock(side_effect=fetch_channel_impl)
+    
+    # Setup mocks for rollover: new message goes to configured channel
     old_msg = _message(100, author_id=9999)
     new_msg = _message(200)
-    month_channel.fetch_message = AsyncMock(return_value=old_msg)
-    month_channel.send = AsyncMock(return_value=new_msg)
-
-    from unittest.mock import patch
-
+    
+    stored_channel.fetch_message = AsyncMock(return_value=old_msg)
+    configured_channel.send = AsyncMock(return_value=new_msg)
+    
+    # Run upsert_board which should detect rollover and delete from stored channel
     with patch("src.services.board_service.period_key", return_value="2026-10"):
-        result2 = await upsert_board(bot, session, GUILD, "this_month")
-
-    assert result2 == "recreated"
-
-    # Verify delete attempted: fetch_message called with old message_id and delete called
-    month_channel.fetch_message.assert_awaited()  # At least called (may be called multiple times)
+        # Also patch get_or_create_config to ensure it returns our seeded config
+        def get_or_create_config_impl(sess, gid):
+            c = sess.get(GuildConfig, gid)
+            if c is None:
+                c = GuildConfig(guild_id=gid, delete_previous_month_message=True)
+                sess.add(c)
+                sess.commit()
+            # Verify delete_previous_month_message is True
+            if not c.delete_previous_month_message:
+                raise AssertionError(f"Config has delete_previous_month_message={c.delete_previous_month_message}")
+            return c
+        
+        with patch("src.services.board_service.get_or_create_config", side_effect=get_or_create_config_impl):
+            result = await upsert_board(bot, session, GUILD, "this_month")
+    
+    assert result == "recreated"
+    
+    # CRITICAL ASSERTIONS: verify delete happened on STORED channel (111)
+    stored_channel.fetch_message.assert_awaited_once_with(100)
     old_msg.delete.assert_awaited_once()
-    # Verify new message sent
-    month_channel.send.assert_awaited_once()
-
-    post2 = get_board_post(session, GUILD, "this_month")
-    assert post2.message_id == 200
-    assert post2.channel_id == 222  # Now points to new channel
-
-
-async def test_month_rollover_handles_http_exception_on_fetch(session):
-    """
-    DELETED: HTTPException now propagates per fix.
-    See test_initial_fetch_http_exception_propagates_no_duplicate_post instead.
-    """
-    pass
+    
+    # Verify send happened on CONFIGURED channel (222)
+    configured_channel.send.assert_awaited_once()
+    
+    # Verify new post has channel_id=222 and message_id=200
+    post_after = get_board_post(session, GUILD, "this_month")
+    assert post_after.message_id == 200
+    assert post_after.channel_id == 222
+    assert post_after.period_key == "2026-10"
 
 
 async def test_initial_fetch_http_exception_propagates_no_duplicate_post(session):
