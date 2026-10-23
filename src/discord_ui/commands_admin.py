@@ -107,7 +107,3 @@ class AdminCog(commands.Cog):
                                                     ephemeral=True)
         else:
             await interaction.response.send_message("Source not found.", ephemeral=True)
-
-
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(AdminCog(bot))

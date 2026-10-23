@@ -17,9 +17,8 @@ def create_bot() -> commands.Bot:
     # Add AdminCog immediately (sync, for tests and CLI)
     from src.discord_ui.commands_admin import AdminCog
     admin_cog = AdminCog(bot)
-    # Manually register cog in internal structure
-    bot._connection._get_websocket = lambda: None  # Placeholder for cog context
-    # Add groups to tree
+    # Register groups directly on tree at creation so command surface is inspectable
+    # without a Discord connection; AdminCog is intentionally NOT re-added in setup_hook
     bot.tree.add_command(admin_cog.config_group)
     bot.tree.add_command(admin_cog.source_group)
     bot.tree.add_command(admin_cog.board_group)
