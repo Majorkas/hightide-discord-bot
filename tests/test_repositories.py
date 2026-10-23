@@ -34,25 +34,25 @@ def test_get_or_create_config_idempotent(session):
 
 
 def test_upsert_creates_then_updates(session):
-    ev, created = upsert_event(session, 7, _ev())
+    ev, created, _ = upsert_event(session, 7, _ev())
     assert created is True
-    ev2, created2 = upsert_event(session, 7, {**_ev(), "title": "A2"})
+    ev2, created2, _ = upsert_event(session, 7, {**_ev(), "title": "A2"})
     assert created2 is False
     assert ev2.title == "A2"
     assert len(get_active_events(session, 7)) == 1
 
 
 def test_upsert_keeps_first_seen_at(session):
-    ev, _ = upsert_event(session, 7, _ev())
+    ev, _, _ = upsert_event(session, 7, _ev())
     first = ev.first_seen_at
-    ev2, _ = upsert_event(session, 7, {**_ev(), "title": "A2"})
+    ev2, _, _ = upsert_event(session, 7, {**_ev(), "title": "A2"})
     assert ev2.first_seen_at == first
     assert ev2.last_seen_at >= first
 
 
 def test_upsert_partial_data_leaves_other_columns(session):
     upsert_event(session, 7, _ev(price_text="$10", summary="S", fingerprint="f1"))
-    ev, created = upsert_event(session, 7, {"external_id": "wp:1", "title": "New"})
+    ev, created, _ = upsert_event(session, 7, {"external_id": "wp:1", "title": "New"})
     assert created is False
     assert ev.title == "New"
     assert ev.url == "u"
@@ -62,7 +62,7 @@ def test_upsert_partial_data_leaves_other_columns(session):
 
 
 def test_upsert_stores_fingerprint(session):
-    ev, _ = upsert_event(session, 7, _ev(fingerprint="abc123"))
+    ev, _, _ = upsert_event(session, 7, _ev(fingerprint="abc123"))
     assert ev.fingerprint == "abc123"
 
 
@@ -74,14 +74,14 @@ def test_stale_marking_after_two_misses(session):
 
 
 def test_stale_seen_event_not_incremented(session):
-    ev, _ = upsert_event(session, 7, _ev())
+    ev, _, _ = upsert_event(session, 7, _ev())
     assert mark_absent_events_stale(session, 7, {"wp:1"}) == 0
     assert ev.missed_refreshes == 0
     assert ev.is_active is True
 
 
 def test_stale_miss_seen_miss_resets_count(session):
-    ev, _ = upsert_event(session, 7, _ev())
+    ev, _, _ = upsert_event(session, 7, _ev())
     mark_absent_events_stale(session, 7, set())
     assert ev.missed_refreshes == 1
     upsert_event(session, 7, _ev())  # seen again
@@ -96,14 +96,14 @@ def test_reappearance_after_deactivation_reactivates(session):
     mark_absent_events_stale(session, 7, set())
     mark_absent_events_stale(session, 7, set())
     assert get_active_events(session, 7) == []
-    ev, created = upsert_event(session, 7, _ev())
+    ev, created, _ = upsert_event(session, 7, _ev())
     assert created is False
     assert ev.is_active is True
     assert ev.missed_refreshes == 0
 
 
 def test_inactive_events_not_recounted(session):
-    ev, _ = upsert_event(session, 7, _ev())
+    ev, _, _ = upsert_event(session, 7, _ev())
     mark_absent_events_stale(session, 7, set())
     assert mark_absent_events_stale(session, 7, set()) == 1
     assert ev.missed_refreshes == 2
@@ -112,7 +112,7 @@ def test_inactive_events_not_recounted(session):
 
 
 def test_stale_guild_isolation(session):
-    other, _ = upsert_event(session, 8, _ev())
+    other, _, _ = upsert_event(session, 8, _ev())
     upsert_event(session, 7, _ev())
     mark_absent_events_stale(session, 7, set())
     mark_absent_events_stale(session, 7, set())
@@ -143,3 +143,12 @@ def test_week_and_month_posts_coexist(session):
     assert session.query(BoardPost).count() == 2
     assert get_board_post(session, 7, "this_week").message_id == 100
     assert get_board_post(session, 7, "this_month").message_id == 200
+
+
+def test_upsert_event_changed_flag(session):
+    _, created, changed = upsert_event(session, 7, _ev(fingerprint="f1"))
+    assert created and changed
+    _, created, changed = upsert_event(session, 7, _ev(fingerprint="f1"))
+    assert not created and not changed
+    _, created, changed = upsert_event(session, 7, _ev(fingerprint="f2"))
+    assert not created and changed

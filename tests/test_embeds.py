@@ -1,6 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from src.db.models import Event
 from src.discord_ui.embeds import build_board_embed
 
@@ -167,15 +169,17 @@ def test_embed_total_char_limit():
     for field in embed.fields:
         assert len(field.value) <= 1024, f"Field '{field.name}' has {len(field.value)} chars"
 
-    # Each day has 4 ~170-char lines; 3 fit in the 1014 budget, so exactly 1 is dropped per day
+    # Each day has 4 ~170-char lines; 3 fit in the 1014 budget, so exactly 1 is dropped per day.
+    # Trimmed fields collapse into a trailing indicator: 140 events - 6 days * 4 = 116 removed.
     assert [f.name for f in embed.fields] == [
         "Thu 01 Jan 2026", "Fri 02 Jan 2026", "Sat 03 Jan 2026",
-        "Sun 04 Jan 2026", "Mon 05 Jan 2026", "Tue 06 Jan 2026",
+        "Sun 04 Jan 2026", "Mon 05 Jan 2026", "Tue 06 Jan 2026", "…",
     ]
-    for field in embed.fields:
+    for field in embed.fields[:-1]:
         value_lines = field.value.split("\n")
         assert value_lines[-1] == "… +1 more"
         assert len(value_lines) - 1 == 3
+    assert embed.fields[-1].value == "… +116 more events"
 
 
 def test_tba_dropped_when_over_limit():
@@ -210,14 +214,14 @@ def test_tba_dropped_when_over_limit():
     total_chars += len(embed.footer.text or "")
     assert total_chars <= 6000, f"Embed has {total_chars} chars"
 
-    # Observed behavior: the 6000-char loop strips the TBA field entirely (the "… and N undated
-    # events" replacement is itself removed), along with every day field after the 6th.
+    # The 6000-char guard removes the TBA field and every day field after the 6th, collapsing
+    # them into one indicator: (140 dated + 8 TBA) - 6 days * 4 = 124 events removed.
     assert [f.name for f in embed.fields] == [
         "Thu 01 Jan 2026", "Fri 02 Jan 2026", "Sat 03 Jan 2026",
-        "Sun 04 Jan 2026", "Mon 05 Jan 2026", "Tue 06 Jan 2026",
+        "Sun 04 Jan 2026", "Mon 05 Jan 2026", "Tue 06 Jan 2026", "…",
     ]
     assert all(f.name != "Date TBA" for f in embed.fields)
-    assert all("undated" not in f.value for f in embed.fields)
+    assert embed.fields[-1].value == "… +124 more events"
 
 
 def test_many_days_plus_tba_with_include_true():
@@ -243,6 +247,136 @@ def test_many_days_plus_tba_with_include_true():
     # UNCONDITIONAL: Later field must be present (overflow from 30 days)
     assert "Later" in field_names, "Expected 'Later' field when 30 days of events overflow"
 
+def test_later_lines_carry_day_prefix():
+    base_dt = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
+    events = [make_event(f"E{i}", base_dt + timedelta(days=i)) for i in range(26)]
+    embed = build_board_embed(events, "Test", TZ, include_tba=False)
+    later = next(f for f in embed.fields if f.name == "Later")
+    # Day 25 (index 24) is Sat 25 Jan 2026 in Perth.
+    assert later.value.split("\n")[0].startswith("Sun 25 Jan `14:30`")
+    assert "Mon 26 Jan `14:30`" in later.value
+
+
+def test_deterministic_order_within_day_and_tba():
+    dt = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    a = [make_event("B", dt), make_event("A", dt), make_event("Z", None), make_event("M", None)]
+    e1 = build_board_embed(a, "T", TZ, include_tba=True)
+    e2 = build_board_embed(list(reversed(a)), "T", TZ, include_tba=True)
+    assert [(f.name, f.value) for f in e1.fields] == [(f.name, f.value) for f in e2.fields]
+    day = e1.fields[0].value.split("\n")
+    assert "[A]" in day[0] and "[B]" in day[1]
+    tba = e1.fields[-1].value.split("\n")
+    assert tba[0].startswith("[M]") and tba[1].startswith("[Z]")
+
+
+def test_truncate_lines_marker_only_when_first_line_too_long():
+    from src.discord_ui.embeds import _truncate_lines
+    text, dropped = _truncate_lines(["x" * 50, "y"], 20)
+    assert text == "… +2 more" and dropped == 2
+
+
+def test_truncate_lines_keeps_contiguous_prefix():
+    from src.discord_ui.embeds import _truncate_lines
+    # A short line after a too-long one must not be kept (no gaps).
+    text, dropped = _truncate_lines(["a" * 10, "b" * 40, "c"], 30)
+    assert text == "a" * 10 + "\n… +2 more" and dropped == 2
+
+
+def test_truncate_lines_no_truncation_when_fits():
+    from src.discord_ui.embeds import _truncate_lines
+    assert _truncate_lines(["a", "b"], 10) == ("a\nb", 0)
+
+
+def _total_chars(embed) -> int:
+    return (len(embed.title or "") + len(embed.description or "")
+            + sum(len(f.name) + len(f.value) for f in embed.fields)
+            + len(embed.footer.text or ""))
+
+
+def test_guard_collapses_removed_content_into_indicator():
+    base_dt = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
+    events = []
+    for day in range(20):
+        for i in range(3):
+            events.append(make_event(f"{'W' * 150} {day}_{i}", base_dt + timedelta(days=day)))
+    embed = build_board_embed(events, "Test", TZ, include_tba=False)
+
+    assert len(embed.fields) <= 25
+    assert all(len(f.value) <= 1024 for f in embed.fields)
+    assert _total_chars(embed) <= 6000
+    indicator = embed.fields[-1]
+    assert indicator.name == "…"
+    shown = len(embed.fields) - 1
+    assert indicator.value == f"… +{60 - shown * 3} more events"
+    assert "+" in indicator.value and "more events" in indicator.value
+
+
+def test_guard_indicator_never_exceeds_field_cap():
+    # 25 fields each ~250 chars: total > 6000 only via many fields; indicator must still fit the cap.
+    base_dt = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
+    events = [make_event(f"{'Q' * 200}{d}", base_dt + timedelta(days=d)) for d in range(40)]
+    embed = build_board_embed(events, "Test", TZ, include_tba=True)
+    assert len(embed.fields) <= 25
+    assert _total_chars(embed) <= 6000
+
+
+HOSTILE_TITLE = "x](https://evil.example) @everyone <@123>"
+
+
+def test_hostile_title_cannot_take_over_link():
+    dt = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    ev = make_event(HOSTILE_TITLE, dt, price_text="$5](https://evil.example) @here")
+    ev.url = "https://example.com/ok"
+    embed = build_board_embed([ev], "T", TZ, include_tba=False)
+    value = embed.fields[0].value
+    assert "](https://evil.example)" not in value
+    assert "<@123>" not in value
+    assert "@everyone" not in value
+    assert "@here" not in value
+    assert value.count("](") == 1  # only the legitimate link
+
+
+def test_hostile_url_breakout_is_neutralised():
+    dt = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    ev = make_event("Safe", dt)
+    ev.url = "https://example.com/a) [click](https://evil.example"
+    embed = build_board_embed([ev], "T", TZ, include_tba=False)
+    value = embed.fields[0].value
+    assert "[click](https://evil.example)" not in value
+    assert value.endswith("(https://example.com/a%29%20[click]%28https://evil.example)")
+    assert value.count("](") == 1
+
+
+@pytest.mark.parametrize("url", [None, "", "javascript:alert(1)", "ftp://x.example/a", "not a url"])
+def test_invalid_url_renders_plain_text(url):
+    dt = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    ev = make_event("Plain Title", dt)
+    ev.url = url
+    value = build_board_embed([ev], "T", TZ, include_tba=False).fields[0].value
+    assert "](" not in value
+    assert "Plain Title" in value
+
+
+def test_invalid_url_plain_text_in_tba_and_later():
+    ev = make_event("Undated", None)
+    ev.url = None
+    embed = build_board_embed([ev], "T", TZ, include_tba=True)
+    assert embed.fields[-1].value == "Undated"
+
+
+def test_newlines_collapsed_in_title():
+    dt = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    ev = make_event("Line1\n# Heading\nLine3", dt)
+    value = build_board_embed([ev], "T", TZ, include_tba=False).fields[0].value
+    assert "\n" not in value
+
+
+def test_hostile_title_escaped_in_tba():
+    ev = make_event(HOSTILE_TITLE, None)
+    ev.url = "https://example.com/ok"
+    value = build_board_embed([ev], "T", TZ, include_tba=True).fields[-1].value
+    assert "](https://evil.example)" not in value
+    assert "<@123>" not in value and "@everyone" not in value
 
 def test_many_days_plus_tba_with_include_false():
     """Test 30 days + 1 undated event with include_tba=False: ≤25 fields (no Date TBA)."""

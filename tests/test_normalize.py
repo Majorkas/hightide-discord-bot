@@ -1,5 +1,7 @@
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from src.scraping.normalize import (
     clean_title, extract_price, extract_time, fingerprint, parse_event_datetime,
 )
@@ -62,3 +64,74 @@ def test_fingerprint_stable():
     a = fingerprint("t", "2026-10-23", "$15", "sum")
     b = fingerprint("t", "2026-10-23", "$15", "sum")
     assert a == b and len(a) == 40
+
+
+_BASE_FP_INPUTS = ("t", "2026-10-23T18:00", "$15", "sum")
+
+
+@pytest.mark.parametrize("idx,new_value", [
+    (0, "t2"), (1, "2026-10-24T18:00"), (2, "$16"), (3, "sum2"),
+])
+def test_fingerprint_changes_with_each_input(idx, new_value):
+    varied = list(_BASE_FP_INPUTS)
+    varied[idx] = new_value
+    assert fingerprint(*varied) != fingerprint(*_BASE_FP_INPUTS)
+
+
+def test_fingerprint_none_equals_empty_string():
+    assert fingerprint("t", None, None, None) == fingerprint("t", "", "", "")
+
+
+def test_fingerprint_pipe_join_collision_is_known():
+    # Known, accepted property: parts are "|"-joined, so ("a","b") and ("a|b",)
+    # hash identically. Real inputs are (title, iso, price, summary); a collision
+    # would need a literal "|" in one field AND matching neighbours.
+    assert fingerprint("a", "b") == fingerprint("a|b")
+
+
+@pytest.mark.parametrize("title,ymd", [
+    ("Event – October 23rd 2026", (2026, 10, 23)),
+    ("Event – october 23rd 2026", (2026, 10, 23)),
+    ("Event – October 1st 2026", (2026, 10, 1)),
+    ("Event – October 2nd 2026", (2026, 10, 2)),
+    ("Event – Friday, October 23rd, 2026", (2026, 10, 23)),
+    ("5.1.26 – Event", (2026, 1, 5)),
+    # Dot prefix wins over a natural-language date when both are present.
+    ("05.11.26 – Event – Friday November 6th 2026", (2026, 11, 5)),
+])
+def test_parse_date_forms(title, ymd):
+    dt, _ = parse_event_datetime(title, TZ)
+    assert dt is not None
+    assert (dt.year, dt.month, dt.day) == ymd
+    assert dt.tzinfo is TZ
+
+
+def test_parse_natural_date_without_year_is_none():
+    dt, _ = parse_event_datetime("Event – Saturday November 7th", TZ)
+    assert dt is None
+
+
+@pytest.mark.parametrize("html,expected", [
+    ("<p>→ Time: 12 PM</p>", "12 PM"),
+    ("<p>→ Time: 12:00am</p>", "12:00am"),
+    ("<p>→ time: 6pm</p>", "6pm"),
+    ("<p>→ TIME: 6pm</p>", "6pm"),
+    ("→ Time: 6pm", "6pm"),  # terminated by end-of-string
+    ("→ Time: 6pm<br>", "6pm"),  # terminated by "<"
+    ("<p>→ Time: soonish</p>", "soonish"),  # malformed: extraction is raw, parser validates
+    ("<p>no time here</p>", None),
+])
+def test_extract_time_table(html, expected):
+    assert extract_time(html) == expected
+
+
+@pytest.mark.parametrize("html,expected", [
+    ("<p>→ Ticket: $15</p>", "$15"),
+    ("<p>→ ticket: $15</p>", "$15"),
+    ("→ Ticket: $15", "$15"),
+    ("→ Ticket: $15<br>", "$15"),
+    ("<p>→ Time: 6pm</p>", None),
+    ("", None),
+])
+def test_extract_price_table(html, expected):
+    assert extract_price(html) == expected
