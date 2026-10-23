@@ -101,8 +101,21 @@ def test_field_value_truncation():
     # UNCONDITIONAL: every field value must be <= 1024 chars
     for field in embed.fields:
         assert len(field.value) <= 1024, f"Field '{field.name}' has {len(field.value)} chars, exceeds 1024"
-    # UNCONDITIONAL: When many events for one day, truncation marker must be present
-    assert any("… +" in f.value for f in embed.fields), "Expected truncation marker in at least one field"
+    # Expected kept lines: greedy fill of the 1014-char budget (1024 minus 10 reserved for the marker)
+    kept = 0
+    used = 0
+    for ev in sorted(events, key=lambda x: x.starts_at):
+        line = f"`14:30` [{ev.title}]({ev.url})"
+        if used + len(line) + 1 > 1024 - 10:
+            break
+        used += len(line) + 1
+        kept += 1
+    expected_dropped = len(events) - kept
+    assert expected_dropped == 46
+    assert len(embed.fields) == 1
+    value_lines = embed.fields[0].value.split("\n")
+    assert value_lines[-1] == f"… +{expected_dropped} more"
+    assert len(value_lines) - 1 == kept == 4
 
 
 def test_field_count_cap():
@@ -154,9 +167,19 @@ def test_embed_total_char_limit():
     for field in embed.fields:
         assert len(field.value) <= 1024, f"Field '{field.name}' has {len(field.value)} chars"
 
+    # Each day has 4 ~170-char lines; 3 fit in the 1014 budget, so exactly 1 is dropped per day
+    assert [f.name for f in embed.fields] == [
+        "Thu 01 Jan 2026", "Fri 02 Jan 2026", "Sat 03 Jan 2026",
+        "Sun 04 Jan 2026", "Mon 05 Jan 2026", "Tue 06 Jan 2026",
+    ]
+    for field in embed.fields:
+        value_lines = field.value.split("\n")
+        assert value_lines[-1] == "… +1 more"
+        assert len(value_lines) - 1 == 3
 
-def test_tba_replaced_with_ellipsis_when_over_limit():
-    """Test TBA section is replaced with '… and N undated events' when limit exceeded."""
+
+def test_tba_dropped_when_over_limit():
+    """Test TBA field is dropped entirely when the 6000-char limit forces trimming."""
     base_dt = datetime(2026, 1, 1, 6, 30, tzinfo=timezone.utc)
 
     # Create enough content to trigger limits + TBA events
@@ -187,14 +210,14 @@ def test_tba_replaced_with_ellipsis_when_over_limit():
     total_chars += len(embed.footer.text or "")
     assert total_chars <= 6000, f"Embed has {total_chars} chars"
 
-    # UNCONDITIONAL: TBA handling verified
-    field_names = [f.name for f in embed.fields]
-    if "Date TBA" in field_names:
-        tba_field = next(f for f in embed.fields if f.name == "Date TBA")
-        assert len(tba_field.value) <= 1024, "TBA field must be within limit"
-    else:
-        # TBA was dropped or replaced; limits are still respected
-        assert True
+    # Observed behavior: the 6000-char loop strips the TBA field entirely (the "… and N undated
+    # events" replacement is itself removed), along with every day field after the 6th.
+    assert [f.name for f in embed.fields] == [
+        "Thu 01 Jan 2026", "Fri 02 Jan 2026", "Sat 03 Jan 2026",
+        "Sun 04 Jan 2026", "Mon 05 Jan 2026", "Tue 06 Jan 2026",
+    ]
+    assert all(f.name != "Date TBA" for f in embed.fields)
+    assert all("undated" not in f.value for f in embed.fields)
 
 
 def test_many_days_plus_tba_with_include_true():
