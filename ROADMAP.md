@@ -10,12 +10,12 @@ Working memory for the build. Plan: `docs/superpowers/plans/2026-10-23-discord-e
 - [x] Task 4: Bot entry point + `/config` and `/source` commands
 - [x] 4-agent council + fixes (guild_only, session lifecycle, input validation, board uniqueness, coverage: 56 tests green, 0 warnings)
 
-## Milestone 2 — Scraper ⬜
+## Milestone 2 — Scraper ✅ (complete 2026-10-23)
 
-- [ ] Task 5: Normalization helpers (dates, price, fingerprint)
-- [ ] Task 6: WP REST fetcher + product parser
-- [ ] Task 7: Event service (upsert/dedupe/stale) + `/board preview`
-- [ ] 4-agent council + fixes
+- [x] Task 5: Normalization helpers (dates, price, fingerprint) — incl. invalid-date guard
+- [x] Task 6: WP REST fetcher + product parser — incl. summary/title-dedupe extraction, From-prefix time overlay
+- [x] Task 7: Event service (upsert/dedupe/stale) + `/board preview` — incl. embed limit guards (≤25 fields / ≤1024 / ≤6000)
+- [x] 4-agent council + fixes (embed injection defense, guard collapse indicator, fetcher hardening, fingerprint change detection, per-product isolation; 163 tests green, 0 warnings)
 
 ## Milestone 3 — Board system ⬜
 
