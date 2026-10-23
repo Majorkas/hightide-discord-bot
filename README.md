@@ -9,7 +9,7 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
   - `#this-week` — rolling 7-day view
   - `#this-month` — current calendar month view (auto-rotates at month boundaries)
 - **Smart event management**: Deduplication by fingerprint, stale-event detection, automatic TBA fallback for missing dates
-- **User commands**: `/events upcoming` shows next 7 days in an ephemeral message
+- **User commands**: `/events upcoming` shows events from today through the next 7 days in an ephemeral message
 - **Admin control**: Configure channels, timezone, refresh time, and event sources per server
 
 ## Setup
@@ -54,10 +54,14 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `DISCORD_TOKEN` | **Required.** Bot token from Discord Developer Portal | `MzUwNzA1ODUyNzIxNTk1OTQ1.D...` |
+| `DISCORD_TOKEN` | **Required.** Bot token from Discord Developer Portal | `your-bot-token` |
 | `DATABASE_URL` | SQLite database path | `sqlite:///./hightide.db` |
 | `DEFAULT_TIMEZONE` | IANA timezone name (server default) | `Australia/Perth` |
-| `GUILD_ID` | Optional Discord server ID (speeds up dev command sync) | `123456789` |
+| `GUILD_ID` | Optional Discord server ID (instant command sync in that guild) | `123456789` |
+
+Never commit `.env`; if the bot token ever leaks, rotate it in the Discord Developer Portal.
+
+Setting `GUILD_ID` makes command sync instant in that guild; when unset, commands sync globally and may take up to an hour to appear.
 
 ## Running the Bot
 
@@ -138,7 +142,7 @@ All admin commands require the **Manage Guild** permission.
 ### User Commands
 
 **`/events upcoming`**
-- Shows events happening in the next 7 days in an ephemeral message.
+- Shows events from today through the next 7 days in an ephemeral message.
 - No permissions required beyond View Channels and Embed Links.
 
 ## Discord Permissions

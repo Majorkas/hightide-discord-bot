@@ -52,7 +52,7 @@ async def test_events_upcoming_sends_ephemeral_embed(db, cog, interaction):
         s.add(Event(
             guild_id=GUILD, external_id="wp:test", title="Test Event",
             url="https://example.com",
-            starts_at=datetime.now(tz) + timedelta(hours=1),
+            starts_at=datetime.now(tz) + timedelta(days=2),
             time_known=True, is_active=True,
         ))
         s.commit()
@@ -61,7 +61,10 @@ async def test_events_upcoming_sends_ephemeral_embed(db, cog, interaction):
     _, kwargs = interaction.response.send_message.call_args
     assert kwargs["ephemeral"] is True
     assert isinstance(kwargs["embed"], discord.Embed)
-    assert kwargs["embed"].title == "Upcoming Events"
+    embed = kwargs["embed"]
+    assert embed.title == "Upcoming Events"
+    assert embed.description is None
+    assert any("Test Event" in f.value for f in embed.fields)
 
 
 async def test_events_upcoming_failure_is_ephemeral(db, cog, interaction, monkeypatch):
@@ -73,5 +76,6 @@ async def test_events_upcoming_failure_is_ephemeral(db, cog, interaction, monkey
     interaction.response.send_message.assert_awaited_once()
     args, kwargs = interaction.response.send_message.call_args
     assert kwargs["ephemeral"] is True
-    assert "RuntimeError" in args[0]
+    assert args[0] == "Could not load events right now — try again later."
+    assert "RuntimeError" not in args[0]
     assert "db down" not in args[0]

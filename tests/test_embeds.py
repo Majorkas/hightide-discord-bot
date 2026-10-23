@@ -371,6 +371,15 @@ def test_newlines_collapsed_in_title():
     assert "\n" not in value
 
 
+def test_bidi_controls_stripped_from_title():
+    dt = datetime(2026, 10, 23, 6, 30, tzinfo=timezone.utc)
+    ev = make_event("Evil\u202eTitle\u2066x\u2069", dt)
+    ev.url = "https://example.com/ok"
+    value = build_board_embed([ev], "T", TZ, include_tba=False).fields[0].value
+    assert "EvilTitlex" in value
+    assert not any(c in value for c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
 def test_hostile_title_escaped_in_tba():
     ev = make_event(HOSTILE_TITLE, None)
     ev.url = "https://example.com/ok"
