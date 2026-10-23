@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 from datetime import datetime, time, timedelta
@@ -14,8 +15,15 @@ from src.discord_ui.embeds import build_board_embed
 log = logging.getLogger("hightide.board")
 
 
-def _window(board_type: str, cfg, tz) -> tuple[datetime, datetime]:
-    now = datetime.now(tz)
+_board_locks: dict[tuple[int, str], asyncio.Lock] = {}
+
+
+def _get_board_lock(guild_id: int, board_type: str) -> asyncio.Lock:
+    return _board_locks.setdefault((guild_id, board_type), asyncio.Lock())
+
+
+def _window(board_type: str, cfg, tz, *, now: datetime | None = None) -> tuple[datetime, datetime]:
+    now = now or datetime.now(tz)
     if board_type == "this_week":
         if cfg.week_start_mode == "today_start":
             start = datetime.combine(now.date(), time.min, tzinfo=tz)
@@ -31,16 +39,17 @@ def _window(board_type: str, cfg, tz) -> tuple[datetime, datetime]:
     return start, end
 
 
-def period_key(board_type: str, tz) -> str:
-    now = datetime.now(tz)
+def period_key(board_type: str, tz, *, now: datetime | None = None) -> str:
+    now = now or datetime.now(tz)
     if board_type == "this_month":
         return now.strftime("%Y-%m")
     iso = now.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
 
 
-def filter_events_for_board(events: list[Event], board_type: str, cfg, tz) -> list[Event]:
-    start, end = _window(board_type, cfg, tz)
+def filter_events_for_board(events: list[Event], board_type: str, cfg, tz, *,
+                            now: datetime | None = None) -> list[Event]:
+    start, end = _window(board_type, cfg, tz, now=now)
     out = []
     for e in events:
         if e.starts_at is None:
@@ -55,12 +64,17 @@ def filter_events_for_board(events: list[Event], board_type: str, cfg, tz) -> li
 
 def render_board_hash(events: list[Event], board_type: str, cfg, tz) -> str:
     parts = [board_type, str(tz)]
-    for e in sorted(events, key=lambda x: (x.starts_at or datetime.max.replace(tzinfo=tz), x.title)):
+    for e in sorted(events, key=lambda x: (x.starts_at or datetime.max.replace(tzinfo=tz), x.title, x.external_id)):
         parts.append(f"{e.external_id}|{e.title}|{e.starts_at}|{e.price_text}|{e.time_known}|{e.url}")
     return hashlib.sha1("||".join(parts).encode("utf-8")).hexdigest()
 
 
 async def upsert_board(bot, session: Session, guild_id: int, board_type: str) -> str:
+    async with _get_board_lock(guild_id, board_type):
+        return await _upsert_board_locked(bot, session, guild_id, board_type)
+
+
+async def _upsert_board_locked(bot, session: Session, guild_id: int, board_type: str) -> str:
     cfg = get_or_create_config(session, guild_id)
     tz_channel = cfg.this_week_channel_id if board_type == "this_week" else cfg.this_month_channel_id
     if not tz_channel:
@@ -76,24 +90,25 @@ async def upsert_board(bot, session: Session, guild_id: int, board_type: str) ->
     channel = bot.get_channel(tz_channel) or await bot.fetch_channel(tz_channel)
     post = get_board_post(session, guild_id, board_type)
 
-    if post and post.render_hash == new_hash and post.period_key == key and post.channel_id == channel.id:
-        try:
-            await channel.fetch_message(post.message_id)
-        except discord.NotFound:
-            log.info("board message missing for %s, recreating", board_type)
-        else:
-            return "skipped"
-
-    # try to edit existing (only if channel hasn't changed)
+    # Fetch the existing message once (only if the channel hasn't changed).
+    msg = None
     if post and post.channel_id == channel.id:
         try:
             msg = await channel.fetch_message(post.message_id)
+        except (discord.NotFound, discord.Forbidden):
+            log.info("board message missing for %s, recreating", board_type)
+
+    if msg is not None:
+        if post.render_hash == new_hash and post.period_key == key:
+            return "skipped"
+        try:
             await msg.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.NotFound, discord.Forbidden):
+            log.info("board message missing for %s, recreating", board_type)
+        else:
             save_board_post(session, guild_id, board_type, key,
                             channel.id, msg.id, new_hash)
             return "edited"
-        except discord.NotFound:
-            log.info("board message missing for %s, recreating", board_type)
 
     msg = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     save_board_post(session, guild_id, board_type, key, channel.id, msg.id, new_hash)

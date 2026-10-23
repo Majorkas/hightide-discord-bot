@@ -197,19 +197,27 @@ class AdminCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         from src.db.repositories import get_board_post
         from src.services.board_service import upsert_board
-        with _session() as session:
-            post = get_board_post(session, interaction.guild_id, board_type)
-            if post:
-                # Best-effort delete old Discord message
-                try:
-                    channel = self.bot.get_channel(post.channel_id)
-                    if channel:
+        try:
+            with _session() as session:
+                post = get_board_post(session, interaction.guild_id, board_type)
+                if post:
+                    # Best-effort delete of the old Discord message (bot-authored only)
+                    try:
+                        channel = (self.bot.get_channel(post.channel_id)
+                                   or await self.bot.fetch_channel(post.channel_id))
                         msg = await channel.fetch_message(post.message_id)
-                        await msg.delete()
-                except (discord.NotFound, discord.Forbidden):
-                    pass  # Message already gone or no permission
-                session.delete(post)
-                session.commit()
-            action = await upsert_board(self.bot, session, interaction.guild_id, board_type)
+                        if msg.author.id == self.bot.user.id:
+                            await msg.delete()
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        pass  # Already gone or no permission
+                    session.delete(post)
+                    session.commit()
+                action = await upsert_board(self.bot, session, interaction.guild_id, board_type)
+        except Exception as e:
+            import logging
+            logging.getLogger("hightide").exception("board recreate failed")
+            await interaction.followup.send(
+                f"Recreate failed: {type(e).__name__}: {str(e)}", ephemeral=True)
+            return
         await interaction.followup.send(
             f"{board_type} board action: {action}", ephemeral=True)
