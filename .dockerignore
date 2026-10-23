@@ -1,0 +1,14 @@
+.venv/
+.git/
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+.superpowers/
+tests/
+docs/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+ROADMAP.md

@@ -184,19 +184,44 @@ https://discord.com/api/oauth2/authorize?client_id=1563111587500400660&permissio
 ### Local Deployment
 Run the bot on your machine or a local server. The SQLite database is stored locally (default: `hightide.db` in the repo root).
 
-### Cloud Deployment (Railway / Render)
+### Deploy: Fly.io
 
-1. **Set up a persistent volume** for the SQLite database (or use a managed database like PostgreSQL, which requires installing a driver such as psycopg; PostgreSQL support is untested).
+The bot is a worker (no ports, no HTTP). `fly.toml` uses `Dockerfile`, region `syd`, a 256 MB shared-cpu-1x VM and a 1 GB volume at `/data` for SQLite; this fits Fly's free allowance, though Fly requires a card on file.
 
-2. **Set environment variables** in your deployment platform:
-   - `DISCORD_TOKEN` — your bot token
-   - `DATABASE_URL` — path to the persistent database (e.g., `/data/hightide.db` on a mounted volume)
-   - `DEFAULT_TIMEZONE` — your region's IANA timezone
-   - `GUILD_ID` — (optional) your Discord server ID
+1. **Install and log in**:
+   ```bash
+   brew install flyctl
+   fly auth signup   # or: fly auth login
+   ```
 
-3. **Deploy as a worker** (not an HTTP service).
+2. **Create the app** (pick your own app name; `hightide-discord-bot` in `fly.toml` is a placeholder). Keep the existing `fly.toml` and answer No to any web-service, Postgres or Redis offers:
+   ```bash
+   fly launch --no-deploy
+   ```
 
-4. **Run command**: `python -m src.bot`
+3. **Create the volume**:
+   ```bash
+   fly volumes create hightide_data --size 1 --region syd
+   ```
+
+4. **Set secrets** (see Environment Variables above):
+   ```bash
+   fly secrets set DISCORD_TOKEN=... GUILD_ID=...
+   fly secrets set DATABASE_URL=sqlite:////data/hightide.db DEFAULT_TIMEZONE=Australia/Perth
+   ```
+
+5. **Deploy**:
+   ```bash
+   fly deploy
+   ```
+
+6. **First run in Discord**: set `/config this_week_channel` and `/config this_month_channel`, then `/board refresh` (see Commands above).
+
+**Operate**: `fly logs` to tail output, `fly ssh console` for a shell. Redeploys keep the volume, so boards and settings persist.
+
+### Other Platforms (Railway / Render)
+
+Run as a worker (not an HTTP service) with `python -m src.bot`, a persistent volume for the SQLite database, and the environment variables above (e.g. `DATABASE_URL=sqlite:////data/hightide.db`). PostgreSQL requires a driver such as psycopg and is untested.
 
 ### Database Persistence
 - **SQLite (default)**: Ensure the database file lives on a persistent volume that survives restarts.
