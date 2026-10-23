@@ -1,0 +1,238 @@
+# Hightide Discord Events Bot
+
+A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop's WordPress store and maintains two persistent event boards: a rolling 7-day week view and a current-month calendar view.
+
+## Features
+
+- **Automated event scraping**: Fetches events from WordPress REST API daily at 09:00 Australia/Perth
+- **Two persistent boards**: 
+  - `#this-week` — rolling 7-day view
+  - `#this-month` — current calendar month view (auto-rotates at month boundaries)
+- **Smart event management**: Deduplication by fingerprint, stale-event detection, automatic TBA fallback for missing dates
+- **User commands**: `/events upcoming` shows next 7 days in an ephemeral message
+- **Admin control**: Configure channels, timezone, refresh time, and event sources per server
+
+## Setup
+
+### Requirements
+- **Python 3.11+** (this repo uses Python 3.12)
+
+### Installation
+
+1. **Clone the repository** and navigate to the repo root:
+   ```bash
+   git clone https://github.com/yourusername/hightide-discord-bot.git
+   cd hightide-discord-bot
+   ```
+
+2. **Create a virtual environment** (choose one):
+
+   Using `uv` (recommended for this repo):
+   ```bash
+   uv venv --python 3.12 .venv
+   uv pip install --python .venv/bin/python -e '.[dev]'
+   source .venv/bin/activate
+   ```
+
+   Using standard `venv` and `pip`:
+   ```bash
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+   pip install -e '.[dev]'
+   ```
+
+3. **Set environment variables**:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your values (see Environment Variables below)
+   ```
+
+4. **Initialize the database**:
+   The database is automatically created and seeded on first run.
+
+## Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DISCORD_TOKEN` | **Required.** Bot token from Discord Developer Portal | `MzUwNzA1ODUyNzIxNTk1OTQ1.D...` |
+| `DATABASE_URL` | SQLite database path | `sqlite:///./hightide.db` |
+| `DEFAULT_TIMEZONE` | IANA timezone name (server default) | `Australia/Perth` |
+| `GUILD_ID` | Optional Discord server ID (speeds up dev command sync) | `123456789` |
+
+## Running the Bot
+
+Activate the virtual environment, then run:
+
+```bash
+python -m src.bot
+```
+
+Or with the full path:
+
+```bash
+.venv/bin/python -m src.bot
+```
+
+The bot connects to Discord and registers all commands. Check your server to see the `/config`, `/source`, `/board`, and `/events` command groups.
+
+## Testing
+
+From the repo root, with the virtual environment activated:
+
+```bash
+python -m pytest -v
+```
+
+Run a specific test file:
+```bash
+python -m pytest tests/test_board_service.py -v
+```
+
+Run a single test:
+```bash
+python -m pytest tests/test_normalize.py::test_parse_dd_mm_yy -v
+```
+
+## Commands
+
+### Admin Commands
+All admin commands require the **Manage Guild** permission.
+
+**`/config this_week_channel <#channel>`**
+- Sets the Discord channel where the 7-day board posts.
+
+**`/config this_month_channel <#channel>`**
+- Sets the Discord channel where the monthly board posts.
+
+**`/config timezone <IANA timezone>`**
+- Sets the event timezone (e.g., `Australia/Perth`, `America/New_York`).
+- Affects board windows and refresh time interpretations.
+
+**`/config daily_refresh_time <HH:MM>`**
+- Sets the local time (24-hour format) for daily event refresh.
+- Default: `09:00`.
+
+**`/config include_tba <true|false>`**
+- Controls whether a "Date TBA" section appears on boards for events without known dates.
+
+**`/source add url:<URL>`**
+- Adds an event source URL. Default source is the Hightide Events category.
+
+**`/source list`**
+- Lists all configured event sources and their IDs.
+
+**`/source remove <id>`**
+- Removes an event source by ID.
+
+**`/board preview <this_week|this_month>`**
+- Shows a preview of the board for the chosen period (ephemeral, admin only).
+
+**`/board refresh`**
+- Force an immediate fetch and board update.
+
+**`/board recreate <this_week|this_month>`**
+- Recreates the board message for the chosen period (useful if the message is lost).
+
+### User Commands
+
+**`/events upcoming`**
+- Shows events happening in the next 7 days in an ephemeral message.
+- No permissions required beyond View Channels.
+
+## Discord Permissions
+
+Add the bot to your server with the following permissions:
+
+- **View Channels** — read board and event channels
+- **Send Messages** — post and update board messages
+- **Embed Links** — display rich event embeds
+- **Manage Messages** — update and delete board messages
+- **Read Message History** — fetch stored message content for board updates
+
+**OAuth2 scopes**: `bot` and `applications.commands`
+
+**Invite URL template**:
+```
+https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=117824&scope=bot%20applications.commands
+```
+
+(Adjust the `permissions` parameter if you enable additional features.)
+
+## Deployment
+
+### Local Deployment
+Run the bot on your machine or a local server. The SQLite database is stored locally (default: `hightide.db` in the repo root).
+
+### Cloud Deployment (Railway / Render)
+
+1. **Set up a persistent volume** for the SQLite database (or use a managed database).
+
+2. **Set environment variables** in your deployment platform:
+   - `DISCORD_TOKEN` — your bot token
+   - `DATABASE_URL` — path to the persistent database (e.g., `/data/hightide.db` on a mounted volume)
+   - `DEFAULT_TIMEZONE` — your region's IANA timezone
+   - `GUILD_ID` — (optional) your Discord server ID
+
+3. **Deploy as a worker** (not an HTTP service).
+
+4. **Run command**: `python -m src.bot`
+
+### Database Persistence
+- **SQLite (default)**: Ensure the database file lives on a persistent volume that survives restarts.
+- **PostgreSQL** (manual setup): Set `DATABASE_URL=postgresql://user:password@host:port/dbname` and initialize the schema manually.
+
+## Architecture
+
+```
+src/
+  bot.py                    # Bot entry point, intents, command sync
+  config.py                 # Environment variables and defaults
+
+  db/
+    models.py               # SQLAlchemy models (events, boards, config)
+    session.py              # Database engine and session factory
+    repositories.py         # Data access layer
+
+  scraping/
+    fetcher.py              # WordPress REST API client
+    hightide_parser.py      # WP JSON → NormalizedEvent conversion
+    normalize.py            # Date/time/price parsing and fingerprinting
+
+  services/
+    board_service.py        # Board window logic and rendering
+    event_service.py        # Event upsert, dedup, and stale detection
+    scheduler.py            # Daily refresh and month-rollover scheduling
+
+  discord_ui/
+    commands_admin.py       # Admin slash commands
+    commands_user.py        # User slash commands
+    embeds.py               # Embed building
+
+tests/                       # pytest suite with fixtures
+```
+
+## Development
+
+- **Testing**: `pytest` with asyncio and SQLite in-memory databases for isolation
+- **Code style**: Format with standard Python conventions
+- **Logging**: Structured logging via Python's `logging` module
+
+## Troubleshooting
+
+**Bot doesn't respond to commands:**
+- Verify the bot has **View Channels** and **Embed Links** permissions in the server.
+- Check that your `DISCORD_TOKEN` is valid.
+- Use `/config` to verify channels are set.
+
+**Events not updating:**
+- Run `/board refresh` to trigger an immediate fetch.
+- Check bot logs for HTTP or parsing errors.
+- Verify the event source URL is reachable.
+
+**Database errors:**
+- Ensure `DATABASE_URL` points to a writable location.
+- On Railway/Render, verify the persistent volume is mounted and the path is correct.
+
+## License
+
+TBD — this is a private project for Hightide Tabletop LGS.

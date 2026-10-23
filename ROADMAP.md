@@ -28,8 +28,8 @@ Working memory for the build. Plan: `docs/superpowers/plans/2026-10-23-discord-e
 - [x] Task 10: Month rollover + previous-month deletion — incl. stored-channel targeting, authorship + guild guards, save-before-delete ordering
 - [x] 4-agent council + fixes (fetch-once-per-day retry semantics + backoff, rollover failure-path hardening; 265 tests green, 0 warnings)
 
-## Milestone 5 — Hardening ⬜
+## Milestone 5 — Hardening ✅ (complete 2026-10-23)
 
-- [ ] Task 11: `/events upcoming` user command + full test pass (incl. deferred setup_hook startup smoke test)
-- [ ] Task 12: README + .env.example + roadmap polish
+- [x] Task 11: `/events upcoming` user command + full test pass (incl. deferred setup_hook startup smoke test)
+- [x] Task 12: README + .env.example + roadmap polish
 - [ ] 4-agent council + final whole-branch review
