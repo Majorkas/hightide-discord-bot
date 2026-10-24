@@ -1,21 +1,27 @@
-app = "hightide-discord-bot"
-primary_region = "syd"
+# fly.toml app configuration file generated for hightide-discord-bot on 2026-10-23T22:45:54+08:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-[env]
-  DATABASE_URL = "sqlite:////data/hightide.db"
-  DEFAULT_TIMEZONE = "Australia/Perth"
+app = 'hightide-discord-bot'
+primary_region = 'syd'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
+
+[env]
+  DATABASE_URL = 'sqlite:////data/hightide.db'
+  DEFAULT_TIMEZONE = 'Australia/Perth'
+
+[[mounts]]
+  source = 'hightide_data'
+  destination = '/data'
 
 [[restart]]
-  policy = "always"
-
-[mounts]
-  source = "hightide_data"
-  destination = "/data"
+  policy = 'always'
 
 [[vm]]
-  memory = "256mb"
-  cpu_kind = "shared"
+  memory = '256mb'
+  cpu_kind = 'shared'
   cpus = 1
+  memory_mb = 256
