@@ -217,8 +217,9 @@ async def post_product_alerts(bot, session: Session, guild_id: int, products: li
     overflow = len(products) - MAX_ALERTS_PER_RUN
     if overflow > 0:
         # Overflow stays unrecorded so later ticks drain it.
+        plural = "s" if overflow != 1 else ""
         try:
-            await channel.send(f"➕ {overflow} more new products — check the shop.",
+            await channel.send(f"➕ {overflow} more new product{plural} — check the shop.",
                                allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             log.exception("product overflow digest failed")
