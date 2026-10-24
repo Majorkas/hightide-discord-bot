@@ -56,15 +56,35 @@ def _shop(catalog: dict[str, list[dict]], requests=None):
 @pytest.fixture
 def patch_fetch(monkeypatch):
     """Route the service's category fetch through a mutable in-memory catalog."""
-    state = {"catalog": {"pre-orders": []}, "requests": []}
+    state = {"catalog": {"pre-orders": []}, "requests": [], "store": [], "store_calls": []}
     real = fetch_category_products
+    real_resolve = fetcher.resolve_category_id
 
     def fake(base_url, cat_slug, client=None):
         with _shop(state["catalog"], state["requests"]) as c:
             return real(base_url, cat_slug, client=c)
 
+    def fake_resolve(base_url, cat_slug, client=None):
+        with _shop(state["catalog"]) as c:
+            return real_resolve(base_url, cat_slug, client=c)
+
+    def fake_store(base_url, cat_id, client=None):
+        state["store_calls"].append(cat_id)
+        if isinstance(state["store"], Exception):
+            raise state["store"]
+        return state["store"]
+
     monkeypatch.setattr(product_service, "fetch_category_products", fake)
+    monkeypatch.setattr(product_service, "resolve_category_id", fake_resolve)
+    monkeypatch.setattr(product_service, "fetch_store_products", fake_store)
     return state
+
+
+def _store(pid, price="1500", minor=2, prefix="$"):
+    prices = {"currency_minor_unit": minor, "currency_prefix": prefix, "currency_suffix": ""}
+    if price is not None:
+        prices["price"] = price
+    return {"id": pid, "name": "x", "prices": prices}
 
 
 @pytest.fixture
@@ -204,18 +224,209 @@ def test_bad_slug_after_seed_is_skipped_others_still_alert(db, patch_fetch):
     cfg.new_stock_cat_slugs = "pre-orders,typo"
     db.commit()
     patch_fetch["catalog"] = {"pre-orders": [_product(1)]}
-    # first run: unresolvable slug must not leave a half-seeded table
+    # an unresolvable slug neither blocks nor gets a marker; the good slug still seeds
+    assert check_new_products(db, GUILD, BASE, TZ) == []
+    assert _markers(db) == {"seeded:pre-orders"}
+    patch_fetch["catalog"] = {"pre-orders": [_product(1), _product(2)]}
+    assert [p["external_id"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["wp:2"]
+    assert _markers(db) == {"seeded:pre-orders"}
+
+
+def test_all_slugs_failing_on_first_run_raises_and_records_nothing(db, patch_fetch):
+    patch_fetch["catalog"] = {}
     with pytest.raises(FetchError):
         check_new_products(db, GUILD, BASE, TZ)
     assert db.execute(select(ProductAlert)).scalars().all() == []
-    # once seeded, a dead slug is skipped rather than blocking the rest
-    cfg.new_stock_cat_slugs = "pre-orders"
-    db.commit()
+
+
+# --- per-slug seeding ---
+
+def _markers(session, guild=GUILD):
+    return {r.external_id for r in session.execute(
+        select(ProductAlert).where(ProductAlert.guild_id == guild)).scalars()
+        if r.external_id.startswith("seeded")}
+
+
+def _set_slugs(session, slugs):
+    session.get(GuildConfig, GUILD).new_stock_cat_slugs = slugs
+    session.commit()
+
+
+def test_seed_creates_per_slug_marker(db, patch_fetch):
+    patch_fetch["catalog"]["pre-orders"] = []
     check_new_products(db, GUILD, BASE, TZ)
-    cfg.new_stock_cat_slugs = "pre-orders,typo"
-    db.commit()
-    patch_fetch["catalog"] = {"pre-orders": [_product(1), _product(2)]}
+    assert _markers(db) == {"seeded:pre-orders"}
+
+
+def test_adding_slug_after_seed_does_not_flood(db, patch_fetch):
+    patch_fetch["catalog"] = {"pre-orders": [_product(1)]}
+    check_new_products(db, GUILD, BASE, TZ)
+    _set_slugs(db, "pre-orders,sealed")
+    patch_fetch["catalog"] = {"pre-orders": [_product(1)],
+                              "sealed": [_product(10), _product(11)]}
+    assert check_new_products(db, GUILD, BASE, TZ) == []
+    assert _alerted(db) == {"wp:1", "wp:10", "wp:11"}
+    assert _markers(db) == {"seeded:pre-orders", "seeded:sealed"}
+    # the new slug now alerts on genuinely new products
+    patch_fetch["catalog"]["sealed"].append(_product(12))
+    assert [p["external_id"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["wp:12"]
+
+
+def test_new_slug_seed_does_not_swallow_pending_alert_from_seeded_slug(db, patch_fetch):
+    patch_fetch["catalog"] = {"pre-orders": [_product(1)]}
+    check_new_products(db, GUILD, BASE, TZ)
+    _set_slugs(db, "pre-orders,sealed")
+    patch_fetch["catalog"] = {"pre-orders": [_product(1), _product(2)],
+                              "sealed": [_product(2), _product(3)]}
     assert [p["external_id"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["wp:2"]
+    assert _alerted(db) == {"wp:1", "wp:3"}
+
+
+def test_failed_unseeded_slug_retries_seeding_later(db, patch_fetch):
+    patch_fetch["catalog"] = {"pre-orders": []}
+    check_new_products(db, GUILD, BASE, TZ)
+    _set_slugs(db, "pre-orders,sealed")
+    assert check_new_products(db, GUILD, BASE, TZ) == []  # sealed unresolvable
+    assert _markers(db) == {"seeded:pre-orders"}
+    patch_fetch["catalog"] = {"pre-orders": [], "sealed": [_product(7)]}
+    assert check_new_products(db, GUILD, BASE, TZ) == []
+    assert _markers(db) == {"seeded:pre-orders", "seeded:sealed"}
+    assert _alerted(db) == {"wp:7"}
+
+
+def test_legacy_global_marker_covers_existing_slugs(db, patch_fetch):
+    _set_slugs(db, "pre-orders,sealed")
+    db.add(ProductAlert(guild_id=GUILD, external_id="seeded"))
+    db.add(ProductAlert(guild_id=GUILD, external_id="wp:1"))
+    db.commit()
+    patch_fetch["catalog"] = {"pre-orders": [_product(1), _product(2)], "sealed": []}
+    got = check_new_products(db, GUILD, BASE, TZ)
+    assert [p["external_id"] for p in got] == ["wp:2"]
+    assert {"seeded:pre-orders", "seeded:sealed"} <= _markers(db)
+
+
+def test_legacy_marker_then_new_slug_seeds_individually(db, patch_fetch):
+    db.add(ProductAlert(guild_id=GUILD, external_id="seeded"))
+    db.commit()
+    patch_fetch["catalog"] = {"pre-orders": []}
+    check_new_products(db, GUILD, BASE, TZ)  # migrates
+    _set_slugs(db, "pre-orders,extra")
+    patch_fetch["catalog"] = {"pre-orders": [], "extra": [_product(9)]}
+    assert check_new_products(db, GUILD, BASE, TZ) == []
+    assert "seeded:extra" in _markers(db)
+    assert _alerted(db) == {"wp:9"}
+
+
+# --- real prices via Store API ---
+
+@pytest.mark.parametrize("prices,expected", [
+    ({"price": "1500", "currency_minor_unit": 2, "currency_prefix": "$"}, "$15.00"),
+    ({"price": "1999", "currency_minor_unit": 2, "currency_prefix": "$"}, "$19.99"),
+    ({"price": "150000", "currency_minor_unit": 2, "currency_prefix": "$"}, "$1,500.00"),
+    ({"price": "500", "currency_minor_unit": 0, "currency_prefix": "",
+      "currency_suffix": " JPY"}, "500 JPY"),
+    ({"price": "1500"}, "15.00"),  # defaults to 2 decimals, no symbol
+    ({"price": "0", "currency_minor_unit": 2, "currency_prefix": "$"}, None),
+    ({"price": "", "currency_minor_unit": 2, "currency_prefix": "$"}, None),
+    ({"currency_minor_unit": 2, "currency_prefix": "$"}, None),
+    ({"price": "abc"}, None),
+    ({"price": "-5"}, None),
+    ({"price": 1500}, None),
+    ({"price": "1500", "currency_minor_unit": "x"}, None),
+    ({"price": "1500", "currency_minor_unit": 99}, None),
+    (None, None),
+    ("garbage", None),
+])
+def test_format_store_price(prices, expected):
+    assert product_service.format_store_price(prices) == expected
+
+
+def test_alert_price_comes_from_store_api_matched_by_id(db, patch_fetch):
+    patch_fetch["catalog"]["pre-orders"] = []
+    check_new_products(db, GUILD, BASE, TZ)
+    patch_fetch["catalog"]["pre-orders"] = [_product(1, "A"), _product(2, "B")]
+    patch_fetch["store"] = [_store(2, "2500"), _store(1, "1500"), _store(99, "1")]
+    got = {p["external_id"]: p for p in check_new_products(db, GUILD, BASE, TZ)}
+    assert got["wp:1"]["price"] == "$15.00"
+    assert got["wp:2"]["price"] == "$25.00"
+    assert patch_fetch["store_calls"] == [100]
+
+
+def test_store_api_skipped_when_nothing_to_alert(db, patch_fetch):
+    patch_fetch["catalog"]["pre-orders"] = [_product(1)]
+    check_new_products(db, GUILD, BASE, TZ)
+    check_new_products(db, GUILD, BASE, TZ)
+    assert patch_fetch["store_calls"] == []
+
+
+def test_store_api_product_missing_or_zero_price_shows_none(db, patch_fetch):
+    patch_fetch["catalog"]["pre-orders"] = []
+    check_new_products(db, GUILD, BASE, TZ)
+    patch_fetch["catalog"]["pre-orders"] = [_product(1), _product(2), _product(3)]
+    patch_fetch["store"] = [_store(1, price=None), _store(2, "0")]
+    got = check_new_products(db, GUILD, BASE, TZ)
+    assert [p["price"] for p in got] == [None, None, None]
+
+
+def test_store_api_failure_falls_back_with_warning_and_still_alerts(db, patch_fetch, caplog):
+    patch_fetch["catalog"]["pre-orders"] = []
+    check_new_products(db, GUILD, BASE, TZ)
+    patch_fetch["catalog"]["pre-orders"] = [_product(1), _product(2, content="<p>→ Ticket: $25.00</p>")]
+    patch_fetch["store"] = FetchError("boom")
+    with caplog.at_level("WARNING", logger="hightide.products"):
+        got = check_new_products(db, GUILD, BASE, TZ)
+    assert [p["external_id"] for p in got] == ["wp:1", "wp:2"]
+    assert got[0]["price"] is None
+    assert got[1]["price"] == "$25.00"  # content-extracted price is not regressed
+    assert any("store price fetch" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("garbage", [
+    ["x", None, 5, {"id": 1, "prices": "nope"}, {"prices": {"price": "1"}},
+     {"id": 1, "prices": {"price": "abc"}}],
+    [{"id": 1}],
+    [],
+])
+def test_store_api_garbage_does_not_regress_content_price(db, patch_fetch, garbage):
+    patch_fetch["catalog"]["pre-orders"] = []
+    check_new_products(db, GUILD, BASE, TZ)
+    patch_fetch["catalog"]["pre-orders"] = [_product(1, content="<p>→ Ticket: $25.00</p>")]
+    patch_fetch["store"] = garbage
+    assert [p["price"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["$25.00"]
+
+
+def test_store_api_decode_error_degrades(db, patch_fetch):
+    patch_fetch["catalog"]["pre-orders"] = []
+    check_new_products(db, GUILD, BASE, TZ)
+    patch_fetch["catalog"]["pre-orders"] = [_product(1)]
+    patch_fetch["store"] = ValueError("bad json")
+    got = check_new_products(db, GUILD, BASE, TZ)
+    assert [p["price"] for p in got] == [None]
+
+
+def test_fetch_store_products_params_and_pagination():
+    seen: list[httpx.Request] = []
+
+    def handler(request):
+        seen.append(request)
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json=[{"id": page}], headers={"X-WP-TotalPages": "2"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        got = fetcher.fetch_store_products(BASE + "/", 7, client=c)
+    assert [p["id"] for p in got] == [1, 2]
+    assert all(r.url.path == "/wp-json/wc/store/v1/products" for r in seen)
+    assert all(r.url.params["category"] == "7" for r in seen)
+    assert all(r.headers["User-Agent"] == fetcher.UA["User-Agent"] for r in seen)
+
+
+def test_fetch_store_products_requires_https_and_list_shape():
+    with pytest.raises(FetchError):
+        fetcher.fetch_store_products("http://shop.example.com", 7)
+    with httpx.Client(transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json={"code": "x"}))) as c:
+        with pytest.raises(FetchError):
+            fetcher.fetch_store_products(BASE, 7, client=c)
 
 
 def test_per_guild_isolation(db, patch_fetch):

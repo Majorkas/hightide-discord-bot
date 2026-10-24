@@ -102,6 +102,38 @@ def fetch_category_products(base_url: str, cat_slug: str,
         return _fetch_all(own, base_url, cat_slug)
 
 
+def _fetch_store_all(client: httpx.Client, base_url: str, cat_id: int) -> list[dict]:
+    products: list[dict] = []
+    page = 1
+    while True:
+        resp = _get(client, f"{base_url}/wp-json/wc/store/v1/products",
+                    category=cat_id, per_page=100, page=page)
+        batch = resp.json()
+        if not isinstance(batch, list):
+            raise FetchError("unexpected store product response shape")
+        products.extend(batch)
+        try:
+            total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
+        except ValueError:
+            total_pages = 1
+        if page >= min(total_pages, MAX_PAGES) or len(products) >= MAX_PRODUCTS:
+            break
+        page += 1
+    return products[:MAX_PRODUCTS]
+
+
+def fetch_store_products(base_url: str, cat_id: int,
+                         client: httpx.Client | None = None) -> list[dict]:
+    """Fetch WooCommerce Store API products (with prices) for a category id."""
+    base_url = base_url.rstrip("/")
+    if urlparse(base_url).scheme != "https":
+        raise FetchError("base_url must use https")
+    if client is not None:
+        return _fetch_store_all(client, base_url, cat_id)
+    with httpx.Client() as own:
+        return _fetch_store_all(own, base_url, cat_id)
+
+
 def fetch_events(base_url: str, client: httpx.Client | None = None) -> list[dict]:
     """Fetch all Events-category products across all pages."""
     return fetch_category_products(base_url, "events", client)
