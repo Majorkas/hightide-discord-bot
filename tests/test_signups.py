@@ -1,5 +1,4 @@
 """Tests for signup table and service."""
-import pytest
 from sqlalchemy.orm import Session
 
 from src.db.models import Event
@@ -162,37 +161,25 @@ def test_get_event_by_id_wrong_guild(session: Session):
 
 
 def test_guild_isolation(session: Session):
-    """Same event id in two guilds (via different external_ids) → independent signup sets."""
-    # Create same event id in two guilds (same internal id works for this isolation test)
-    session.add(Event(
-        guild_id=1,
-        external_id="ext_1",
-        title="Event 1",
-        url="http://test1.com",
-        is_active=True
-    ))
-    session.add(Event(
-        guild_id=2,
-        external_id="ext_2",  # Different external_id for unique constraint
-        title="Event 1",
-        url="http://test1.com",
-        is_active=True
-    ))
+    """Same event_id in two guilds → list_signups respects guild isolation."""
+    from src.db.models import EventSignup
+    
+    # Create signup rows with SAME event_id but different guild_ids.
+    # This genuinely tests that list_signups(guild1, event_id=X) never returns guild2's rows.
+    session.add(EventSignup(guild_id=1, event_id=100, user_id=200))
+    session.add(EventSignup(guild_id=2, event_id=100, user_id=201))
     session.commit()
 
-    # Both have event_id=1 and event_id=2 respectively; add signups
-    # This test verifies list_signups respects guild_id isolation
-    toggle_signup(session, guild_id=1, event_id=1, user_id=100)
-    toggle_signup(session, guild_id=2, event_id=2, user_id=100)
-
-    # Check isolation
-    signups_guild1 = list_signups(session, guild_id=1, event_id=1)
-    signups_guild2 = list_signups(session, guild_id=2, event_id=2)
+    # Check isolation: guild1 and guild2 have separate signup lists for same event_id
+    signups_guild1 = list_signups(session, guild_id=1, event_id=100)
+    signups_guild2 = list_signups(session, guild_id=2, event_id=100)
 
     assert len(signups_guild1) == 1
     assert len(signups_guild2) == 1
     assert signups_guild1[0].guild_id == 1
+    assert signups_guild1[0].user_id == 200
     assert signups_guild2[0].guild_id == 2
+    assert signups_guild2[0].user_id == 201
 
 
 def test_double_toggle_rapid(session: Session):
@@ -216,28 +203,80 @@ def test_double_toggle_rapid(session: Session):
     assert count_signups(session, event_id=1) == 0
 
 
-def test_concurrent_toggle_race(session: Session):
-    """Concurrent toggle-add of same (event, user) → exactly one row, no exception."""
-    from sqlalchemy.orm import sessionmaker
-    from src.db.session import get_engine
+def test_concurrent_toggle_race(tmp_path):
+    """Concurrent toggle-add of same (event, user) on file-backed DB → exactly one row, no exception."""
+    from unittest import mock
+    from src.db.models import Base, EventSignup
+    from src.db.session import get_engine, get_session_factory
+    from sqlalchemy import select
 
-    # Create an event
-    session.add(Event(
+    # Use a file-backed SQLite DB
+    db_path = tmp_path / "test.db"
+    db_url = f"sqlite:///{db_path}"
+    
+    engine = get_engine(db_url)
+    Base.metadata.create_all(engine)
+    factory = get_session_factory(db_url)
+    factory.configure(bind=engine)
+
+    # Create the event
+    setup_session = factory()
+    setup_session.add(Event(
         guild_id=1,
         external_id="ext_1",
         title="Test Event",
         url="http://test.com",
         is_active=True
     ))
-    session.commit()
+    setup_session.commit()
+    setup_session.close()
 
-    # Simulate two concurrent sessions both trying to add the same signup
-    # First session adds successfully
-    toggle_signup(session, guild_id=1, event_id=1, user_id=100)
-    assert count_signups(session, event_id=1) == 1
+    # Create two separate sessions
+    session_a = factory()
+    session_b = factory()
 
-    # Try to add again from same session (simulates another session that didn't see the first add)
-    # This will hit IntegrityError and be caught, returning added=True
-    added, count = toggle_signup(session, guild_id=1, event_id=1, user_id=100)
-    assert added is False  # Actually toggle removes
-    assert count == 0
+    try:
+        # Mock session_a.execute to simulate the race: on the first call (the check in toggle_signup),
+        # session_b inserts+commits, but we return a class that makes scalar_one_or_none return None
+        # (simulating that A's check didn't see B's row yet due to isolation).
+        # This causes toggle_signup to try to insert, hitting IntegrityError.
+        real_execute = session_a.execute
+        call_count = [0]
+
+        def interleaved_execute(stmt, *args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # On the first execute (the check inside toggle_signup),
+                # inject the concurrent insert from session_b
+                session_b.add(EventSignup(guild_id=1, event_id=1, user_id=100))
+                session_b.commit()
+                # Return None to simulate race: A didn't see B's row yet
+                class FakeResult:
+                    def scalar_one_or_none(self):
+                        return None
+                return FakeResult()
+            # For other calls (like count_signups), use the real execute
+            return real_execute(stmt, *args, **kwargs)
+
+        with mock.patch.object(session_a, "execute", side_effect=interleaved_execute):
+            # Session A calls toggle_signup. Inside toggle_signup:
+            # 1. It calls execute (our mock intercepts, B inserts, we return None result)
+            # 2. Check returns None, so it tries to insert
+            # 3. Insert fails with IntegrityError (B's row exists)
+            # 4. Catches IntegrityError, returns added=True with recomputed count
+            added, count = toggle_signup(session_a, guild_id=1, event_id=1, user_id=100)
+
+        # Assert the race was handled correctly
+        assert added is True, f"Expected added=True (race caught), got {added}"
+        assert count == 1, f"Expected count=1, got {count}"
+
+        # Verify exactly one row exists
+        final_check = session_a.execute(select(EventSignup).where(
+            EventSignup.event_id == 1,
+            EventSignup.user_id == 100
+        )).scalar_one_or_none()
+        assert final_check is not None
+    finally:
+        session_a.close()
+        session_b.close()
+        engine.dispose()
