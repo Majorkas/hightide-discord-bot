@@ -5,6 +5,7 @@ load_dotenv()  # must run before src.config reads the environment
 import logging  # noqa: E402
 
 import discord  # noqa: E402
+from discord import app_commands  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
@@ -33,6 +34,14 @@ def register_persistent_views(bot: commands.Bot, session_factory) -> None:
                          message_id=cfg.roles_message_id)
 
 
+async def _reply_cooldown(interaction: discord.Interaction) -> None:
+    msg = "Slow down — try again in a moment."
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
 def create_bot() -> commands.Bot:
     intents = discord.Intents.default()
     bot = commands.Bot(command_prefix="!", intents=intents)
@@ -58,6 +67,16 @@ def create_bot() -> commands.Bot:
     bot.tree.add_command(roles_cog.roles_group)
     bot.tree.add_command(roles_cog.card_lookup)  # Top-level /card command
     bot.tree.add_command(roles_cog.deck_lookup)  # Top-level /deck command
+
+    default_on_error = bot.tree.on_error
+
+    @bot.tree.error
+    async def on_app_command_error(interaction: discord.Interaction,
+                                   error: app_commands.AppCommandError) -> None:
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await _reply_cooldown(interaction)
+            return
+        await default_on_error(interaction, error)
 
     @bot.event
     async def setup_hook() -> None:

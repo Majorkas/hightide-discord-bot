@@ -23,7 +23,8 @@ from src.discord_ui.role_views import (
     MAX_PANEL_ROLES, RolesPanelView, build_roles_panel_embed,
 )
 from src.services.deck_service import (
-    build_card_embed, build_deck_embed, fetch_deck, parse_deck_url, scryfall_card,
+    AmbiguousCardError, build_card_embed, build_deck_embed, fetch_deck, parse_deck_url,
+    scryfall_card,
 )
 
 log = logging.getLogger("hightide.discord_ui.commands_roles")
@@ -35,6 +36,7 @@ _MAX_MESSAGE_CHARS = 1900
 _MAX_CARD_NAME_LEN = 100
 _MAX_DECK_URL_LEN = 500
 _LOOKUP_TIMEOUT = 2.6
+_LOOKUP_COOLDOWN_SECONDS = 5.0
 _PANEL_GONE_NOTE = " The panel message is gone — run /roles setup to post it again."
 _PANEL_FORBIDDEN_NOTE = (" I couldn't update the panel (missing permission to view or edit "
                          "it) — check my channel permissions.")
@@ -351,9 +353,13 @@ class RolesCog(commands.Cog):
         description="Look up a Magic card on Scryfall"
     )
     @app_commands.guild_only()
+    @app_commands.checks.cooldown(1, _LOOKUP_COOLDOWN_SECONDS, key=lambda i: i.user.id)
     async def card_lookup(self, interaction: discord.Interaction, name: str) -> None:
         """Look up a Magic card by name and display its details."""
-        # Name length guard
+        name = name.strip()
+        if not name:
+            await interaction.response.send_message("Give me a card name.", ephemeral=True)
+            return
         if len(name) > _MAX_CARD_NAME_LEN:
             await interaction.response.send_message(
                 f"Card name must be ≤{_MAX_CARD_NAME_LEN} characters.",
@@ -373,18 +379,24 @@ class RolesCog(commands.Cog):
                 ephemeral=True
             )
             return
+        except AmbiguousCardError:
+            await interaction.response.send_message(
+                f"Too many cards match '{_md_escape(name)}' — add more words.",
+                ephemeral=True
+            )
+            return
         except httpx.TransportError as e:
-            log.warning(f"Scryfall lookup transport error for '{name}': {e}")
+            log.warning("Scryfall lookup transport error for %r: %r", name, e)
             await interaction.response.send_message(
                 "Scryfall is having trouble — try again shortly.",
                 ephemeral=True
             )
             return
-        except (httpx.HTTPStatusError, Exception) as e:
+        except Exception as e:
             if isinstance(e, httpx.HTTPStatusError):
-                log.warning(f"Scryfall lookup HTTP error for '{name}': {e}")
+                log.warning("Scryfall lookup HTTP error for %r: %r", name, e)
             else:
-                log.error(f"Unexpected error in /card for '{name}': {e}")
+                log.error("Unexpected error in /card for %r: %r", name, e)
             await interaction.response.send_message(
                 "Scryfall is having trouble — try again shortly.",
                 ephemeral=True
@@ -409,8 +421,13 @@ class RolesCog(commands.Cog):
         description="Show a Moxfield or Archidekt deck"
     )
     @app_commands.guild_only()
+    @app_commands.checks.cooldown(1, _LOOKUP_COOLDOWN_SECONDS, key=lambda i: i.user.id)
     async def deck_lookup(self, interaction: discord.Interaction, url: str) -> None:
         """Show a summary embed for a Moxfield or Archidekt deck link."""
+        url = url.strip()
+        if not url:
+            await interaction.response.send_message("Give me a deck link.", ephemeral=True)
+            return
         if len(url) > _MAX_DECK_URL_LEN:
             await interaction.response.send_message(
                 f"Deck link must be ≤{_MAX_DECK_URL_LEN} characters.",
@@ -432,7 +449,7 @@ class RolesCog(commands.Cog):
         except Exception as e:
             parsed = parse_deck_url(url)
             site = parsed[0] if parsed else "The deck site"
-            log.warning(f"/deck lookup failed for {site}: {e!r}")
+            log.warning("/deck lookup failed for %s: %r", site, e)
             await interaction.response.send_message(
                 f"{site} is having trouble — try again shortly.",
                 ephemeral=True

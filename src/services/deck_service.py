@@ -1,5 +1,6 @@
 """Scryfall card and deck lookup services."""
 import logging
+import math
 import re
 from dataclasses import dataclass
 from time import monotonic as _monotonic
@@ -43,80 +44,67 @@ def _get_retry_decorator(retries: bool):
         return identity
 
 
+class AmbiguousCardError(Exception):
+    """Scryfall's fuzzy search matched too many cards (404 with type "ambiguous")."""
+
+
+async def _get_card(params: dict, *, retries: bool, timeout: float) -> httpx.Response:
+    """GET /cards/named; returns the response for 200/404, raises for everything else."""
+    @_get_retry_decorator(retries)
+    async def _get_with_retry(client: httpx.AsyncClient) -> httpx.Response:
+        resp = await client.get(f"{SCRYFALL_API}/cards/named", params=params, headers=UA, timeout=timeout)
+        if resp.status_code >= 500 or resp.status_code == 429:
+            resp.raise_for_status()
+        return resp
+
+    async with httpx.AsyncClient() as client:
+        resp = await _get_with_retry(client)
+    if resp.status_code not in (200, 404):
+        resp.raise_for_status()
+    return resp
+
+
 async def scryfall_card(name: str, *, retries: bool = True, timeout: float = 15.0) -> dict | None:
     """Fetch a card from Scryfall using fuzzy name matching.
 
-    Args:
-        name: Card name to look up
-        retries: Whether to retry on transient errors (default True)
-        timeout: Request timeout in seconds (default 15.0)
-
-    Returns dict with card data on 200.
-    Returns None on 404 (card not found).
-    Raises httpx.TransportError or httpx.HTTPStatusError for network/5xx errors.
+    Returns dict with card data on 200; None on 404 (card not found).
+    Raises AmbiguousCardError on a 404 whose body has type "ambiguous".
+    Raises HTTPStatusError for ANY non-200/404 status (including 400/403/422); TransportError
+    on network failure; retries/timeout control attempts and per-phase budget.
     """
-    @_get_retry_decorator(retries)
-    async def _get_with_retry(client: httpx.AsyncClient) -> httpx.Response:
-        resp = await client.get(f"{SCRYFALL_API}/cards/named", params={"fuzzy": name}, headers=UA, timeout=timeout)
-        if resp.status_code >= 500 or resp.status_code == 429:
-            resp.raise_for_status()
-        return resp
-
-    async with httpx.AsyncClient() as client:
-        resp = await _get_with_retry(client)
-        if resp.status_code == 200:
-            return resp.json()
-        elif resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return None
+    resp = await _get_card({"fuzzy": name}, retries=retries, timeout=timeout)
+    if resp.status_code == 200:
+        return resp.json()
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and body.get("type") == "ambiguous":
+        raise AmbiguousCardError(name)
+    return None
 
 
-async def scryfall_card_exact(name: str) -> dict | None:
+async def scryfall_card_exact(name: str, *, retries: bool = True, timeout: float = 15.0) -> dict | None:
     """Fetch a card from Scryfall using exact name matching.
 
-    Args:
-        name: Card name to look up (exact match required)
-
-    Returns:
-        dict with card data on 200, None on 404.
-
-    Raises:
-        httpx.TransportError: Network/connectivity errors (propagate to caller).
-        httpx.HTTPStatusError: 5xx and 429 errors (propagate to caller after retries).
-
+    Returns dict with card data on 200; None on 404.
+    Raises HTTPStatusError for ANY non-200/404 status (including 400/403/422); TransportError
+    on network failure; retries/timeout control attempts and per-phase budget.
     Used by Task 9 for wants board card resolution. Callers must handle exceptions.
     """
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(min=1, max=8),
-        retry=retry_if_exception(_is_retryable),
-        reraise=True,
-    )
-    async def _get_with_retry(client: httpx.AsyncClient) -> httpx.Response:
-        resp = await client.get(f"{SCRYFALL_API}/cards/named", params={"exact": name}, headers=UA, timeout=15.0)
-        if resp.status_code >= 500 or resp.status_code == 429:
-            resp.raise_for_status()
-        return resp
-
-    async with httpx.AsyncClient() as client:
-        resp = await _get_with_retry(client)
-        if resp.status_code == 200:
-            return resp.json()
-        elif resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return None
+    resp = await _get_card({"exact": name}, retries=retries, timeout=timeout)
+    return resp.json() if resp.status_code == 200 else None
 
 
-_SCRYFALL_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_SCRYFALL_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 
 
 async def scryfall_card_by_id(sfid: str, *, retries: bool = True, timeout: float = 15.0) -> dict | None:
     """Fetch a card from Scryfall by its UUID.
 
     Returns dict on 200; None on 404 or a malformed id (no request is made).
-    Raises httpx.TransportError or httpx.HTTPStatusError for network/5xx errors.
+    Raises HTTPStatusError for ANY non-200/404 status (including 400/403/422); TransportError
+    on network failure; retries/timeout control attempts and per-phase budget.
     """
     if not _SCRYFALL_ID.match(sfid):
         return None
@@ -138,20 +126,22 @@ async def scryfall_card_by_id(sfid: str, *, retries: bool = True, timeout: float
         return None
 
 
+def _normal_image(uris) -> tuple[bool, str | None]:
+    """(present, safe_url) for an image_uris value; present is False when there is no usable "normal"."""
+    if isinstance(uris, dict) and isinstance(uris.get("normal"), str) and uris["normal"]:
+        return True, _safe_url(uris["normal"])
+    return False, None
+
+
 def _get_card_image_url(card: dict) -> str | None:
     """Extract image URL from card data, handling double-faced cards."""
-    # Single-faced card: use image_uris.normal
-    if card.get("image_uris") and card["image_uris"].get("normal"):
-        url = card["image_uris"]["normal"]
-        return _safe_url(url)
+    present, url = _normal_image(card.get("image_uris"))
+    if present:
+        return url
 
-    # Double-faced card: use card_faces[0].image_uris.normal (front face)
-    if card.get("card_faces") and len(card["card_faces"]) > 0:
-        front_face = card["card_faces"][0]
-        if front_face.get("image_uris") and front_face["image_uris"].get("normal"):
-            url = front_face["image_uris"]["normal"]
-            return _safe_url(url)
-
+    faces = card.get("card_faces")
+    if isinstance(faces, list) and faces and isinstance(faces[0], dict):
+        return _normal_image(faces[0].get("image_uris"))[1]
     return None
 
 
@@ -202,14 +192,21 @@ def build_card_embed(card: dict) -> discord.Embed:
     if not oracle_text and card.get("card_faces") and len(card["card_faces"]) > 0:
         oracle_text = card["card_faces"][0].get("oracle_text", "")
     if oracle_text:
-        oracle = _md_escape(oracle_text)
+        # _md_escape flattens newlines, so escape per line to keep oracle line breaks.
+        oracle = "\n".join(_md_escape(line) for line in oracle_text.splitlines())
         oracle = _trim_description_at_boundary(oracle, 400)
         parts.append(oracle)
 
     # Price
-    if card.get("prices") and card["prices"].get("usd"):
-        usd = float(card["prices"]["usd"])
-        parts.append(f"**USD ${usd:.2f}**")
+    prices = card.get("prices")
+    raw_usd = prices.get("usd") if isinstance(prices, dict) else None
+    if raw_usd:
+        try:
+            usd = float(raw_usd)
+        except (ValueError, TypeError):
+            usd = None
+        if usd is not None and math.isfinite(usd):
+            parts.append(f"**USD ${usd:.2f}**")
 
     description = "\n".join(parts)
 
@@ -243,8 +240,8 @@ class DeckSummary:
 
 _MOXFIELD_HOSTS = {"moxfield.com", "www.moxfield.com"}
 _ARCHIDEKT_HOSTS = {"archidekt.com", "www.archidekt.com"}
-_MOXFIELD_PATH = re.compile(r"^/decks/([A-Za-z0-9_-]{1,64})(?:/[^/]*)?/?$")
-_ARCHIDEKT_PATH = re.compile(r"^/decks/(\d{1,12})(?:/[^/]*)?/?$")
+_MOXFIELD_PATH = re.compile(r"^/decks/([A-Za-z0-9_-]{1,64})(?:/[^/]*)?/?\Z")
+_ARCHIDEKT_PATH = re.compile(r"^/decks/([0-9]{1,12})(?:/[^/]*)?/?\Z")
 _MIN_IMAGE_BUDGET = 0.25
 
 _MOXFIELD_FORMATS = {
@@ -303,7 +300,7 @@ def _moxfield_format(raw) -> str:
     key = str(raw or "").strip().lower()
     if key in _MOXFIELD_FORMATS:
         return _MOXFIELD_FORMATS[key]
-    return key.replace("_", " ").replace("-", " ").title()[:30] or "Unknown"
+    return key.replace("_", " ").replace("-", " ").title()[:30].strip() or "Unknown"
 
 
 def _as_int(v) -> int:
@@ -331,7 +328,7 @@ async def _moxfield_summary(data: dict, deck_id: str, started: float, *, retries
             if card:
                 image_url = _get_card_image_url(card)
         except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as e:
-            log.warning("Scryfall image lookup failed for deck %s: %s", deck_id, e)
+            log.warning("Scryfall image lookup failed for deck %s: %r", deck_id, e)
 
     title = data.get("name")
     # Cap commander at 100 chars
@@ -348,19 +345,40 @@ async def _moxfield_summary(data: dict, deck_id: str, started: float, *, retries
     )
 
 
+def _archidekt_excluded_categories(data: dict) -> tuple[set[str], set[str]]:
+    """(excluded, flagged) lowercase category names from data["categories"] via includedInDeck."""
+    excluded: set[str] = set()
+    flagged: set[str] = set()
+    categories = data.get("categories")
+    for cat in categories if isinstance(categories, list) else []:
+        if not isinstance(cat, dict) or not isinstance(cat.get("includedInDeck"), bool):
+            continue
+        name = str(cat.get("name", "")).lower()
+        flagged.add(name)
+        if not cat["includedInDeck"]:
+            excluded.add(name)
+    return excluded, flagged
+
+
 def _archidekt_summary(data: dict, deck_id: str) -> DeckSummary:
     count = 0
     commander = None
-    for entry in data.get("cards") or []:
+    excluded, flagged = _archidekt_excluded_categories(data)
+    # Categories without an includedInDeck flag fall back to the maybeboard/sideboard names.
+    excluded |= _ARCHIDEKT_EXCLUDED - flagged
+    cards = data.get("cards")
+    for entry in cards if isinstance(cards, list) else []:
         if not isinstance(entry, dict):
             continue
-        cats = {str(c).lower() for c in (entry.get("categories") or [])}
-        if cats & _ARCHIDEKT_EXCLUDED:
+        raw_cats = entry.get("categories")
+        cats = {str(c).lower() for c in (raw_cats if isinstance(raw_cats, list) else [])}
+        if cats & excluded:
             continue
         count += _as_int(entry.get("quantity"))
         if commander is None and "commander" in cats:
-            oracle = (entry.get("card") or {}).get("oracleCard") or {}
-            name = oracle.get("name")
+            card = entry.get("card")
+            oracle = card.get("oracleCard") if isinstance(card, dict) else None
+            name = oracle.get("name") if isinstance(oracle, dict) else None
             commander = name if isinstance(name, str) and name else None
 
     image_url = None
@@ -390,8 +408,11 @@ def _archidekt_summary(data: dict, deck_id: str) -> DeckSummary:
 async def fetch_deck(url: str, *, retries: bool = True, timeout: float = 15.0) -> DeckSummary | None:
     """Fetch a deck summary from a Moxfield or Archidekt link.
 
-    `timeout` is a total budget: the commander-image lookup only gets what the deck
-    request left over, and is skipped (no image) when too little remains.
+    `timeout` is a per-request budget. The Moxfield commander-image lookup gets whatever
+    the deck request left of it (skipped when under _MIN_IMAGE_BUDGET). With retries=False
+    that bounds the whole call; with retries=True each of up to 3 attempts per request gets
+    its own timeout (the image lookup the remainder computed after the deck request), so
+    the total can exceed `timeout`.
 
     Returns None for an unknown host, bad URL, 404/other non-200 or unreadable body.
     Raises httpx.TransportError or httpx.HTTPStatusError for network/5xx/429 errors
