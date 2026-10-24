@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.db.models import BoardPost, Event, EventRolePing, EventSource, GuildConfig, InterestRole, RoleKeyword
@@ -155,4 +156,7 @@ def record_ping(session: Session, guild_id: int, event_id: int, interest_role_id
         return
     session.add(EventRolePing(guild_id=guild_id, event_id=event_id,
                               interest_role_id=interest_role_id))
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()  # concurrent record of the same ping

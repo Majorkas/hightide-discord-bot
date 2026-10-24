@@ -92,6 +92,28 @@ def _valid_emoji(emoji: str) -> bool:
     return has_emoji_codepoint
 
 
+_PRIVILEGED_PERMISSIONS = (
+    "administrator", "manage_guild", "manage_roles", "manage_channels", "manage_webhooks",
+    "kick_members", "ban_members", "mention_everyone", "moderate_members",
+)
+
+
+def _role_rejection(role: discord.Role) -> str | None:
+    """Why this role must never be self-assignable from the panel, or None if it's safe."""
+    if role.is_default():
+        return "@everyone can't be added to the panel."
+    if role.managed:
+        return "That role is managed by an integration and can't be assigned."
+    if not role.is_assignable():
+        return "I can't assign that role — move my role above it and give me Manage Roles."
+    perms = role.permissions
+    risky = [n.replace("_", " ") for n in _PRIVILEGED_PERMISSIONS if getattr(perms, n)]
+    if risky:
+        return ("That role has privileged permissions (" + ", ".join(risky)
+                + ") and can't be self-assigned from the panel.")
+    return None
+
+
 async def _refresh_panel(guild: discord.Guild, session: Session, guild_id: int) -> str:
     """Edit the stored panel in place; returns a note to append to the reply ('' if fine)."""
     cfg = get_or_create_config(session, guild_id)
@@ -124,9 +146,6 @@ async def _refresh_panel(guild: discord.Guild, session: Session, guild_id: int) 
         session.commit()
         return _PANEL_GONE_NOTE
     except discord.HTTPException:
-        cfg.roles_channel_id = None
-        cfg.roles_message_id = None
-        session.commit()
         return _PANEL_FAILED_NOTE
     return ""
 
@@ -144,13 +163,14 @@ class RolesCog(commands.Cog):
     @roles_group.command(name="setup", description="Post (or update) the roles panel")
     async def setup(self, interaction: discord.Interaction,
                     channel: discord.TextChannel) -> None:
+        await interaction.response.defer(ephemeral=True)
         with _session() as session:
             cfg = get_or_create_config(session, interaction.guild_id)
             roles = list_interest_roles(session, interaction.guild_id)
             embed = build_roles_panel_embed(roles)
             view = RolesPanelView(roles)
-            
-            # Delete old panel if switching to a different channel
+
+            # Best-effort cleanup of the old panel when switching channels.
             old_panel_deleted = False
             if cfg.roles_message_id and cfg.roles_channel_id and cfg.roles_channel_id != channel.id:
                 old_channel = interaction.guild.get_channel(cfg.roles_channel_id)
@@ -160,134 +180,113 @@ class RolesCog(commands.Cog):
                         await old_msg.delete()
                         old_panel_deleted = True
                     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                        pass  # Best-effort cleanup
-            
-            http_error = None  # Track HTTPException to handle separately from NotFound
-            http_error_type = None
-            try:
-                message = None
-                # Try to fetch existing message in the target channel
-                if cfg.roles_message_id and cfg.roles_channel_id == channel.id:
-                    try:
-                        message = await channel.fetch_message(cfg.roles_message_id)
-                    except discord.NotFound:
-                        message = None
-                    except discord.Forbidden as e:
-                        http_error = e
-                        http_error_type = "forbidden"
-                    except discord.HTTPException as e:
-                        http_error = e
-                        http_error_type = "http"
-                
-                # Try to edit existing message if found and no HTTP error
-                if message is not None and http_error is None:
-                    try:
-                        await message.edit(embed=embed, view=view)
-                    except discord.NotFound:
-                        message = None
-                    except discord.Forbidden as e:
-                        http_error = e
-                        http_error_type = "forbidden"
-                    except discord.HTTPException as e:
-                        http_error = e
-                        http_error_type = "http"
-                
-                # If we got an HTTP error during fetch/edit, clear IDs and error out
-                if http_error:
+                        pass
+            removed_note = " The old panel was removed." if old_panel_deleted else ""
+
+            message = None
+            if cfg.roles_message_id and cfg.roles_channel_id == channel.id:
+                try:
+                    message = await channel.fetch_message(cfg.roles_message_id)
+                    await message.edit(embed=embed, view=view)
+                except discord.NotFound:
+                    message = None  # gone: fall through and post a fresh panel
+                except discord.Forbidden:
+                    await interaction.followup.send(
+                        "I don't have permission to access the panel — check my channel "
+                        "permissions.", ephemeral=True)
+                    return
+                except discord.HTTPException:
+                    await interaction.followup.send(
+                        "Discord rejected the panel update (check the role emoji)."
+                        + removed_note, ephemeral=True)
+                    return
+
+            if message is None:
+                try:
+                    message = await channel.send(embed=embed, view=view)
+                except discord.Forbidden:
                     cfg.roles_channel_id = None
                     cfg.roles_message_id = None
                     session.commit()
-                    if http_error_type == "forbidden":
-                        msg = f"I don't have permission to access the panel — check my channel permissions."
-                    else:
-                        msg = "Discord rejected the panel update (check the role emoji)."
-                    if old_panel_deleted:
-                        msg += " The old panel was removed."
-                    await interaction.response.send_message(msg, ephemeral=True)
+                    await interaction.followup.send(
+                        f"I don't have permission to post in {channel.mention}."
+                        + removed_note, ephemeral=True)
                     return
-                
-                # Send new message if edit failed or didn't exist
-                if message is None:
-                    message = await channel.send(embed=embed, view=view)
-            except discord.Forbidden:
-                cfg.roles_channel_id = None
-                cfg.roles_message_id = None
-                session.commit()
-                await interaction.response.send_message(
-                    f"I don't have permission to post in {channel.mention}.", ephemeral=True)
-                return
-            except discord.HTTPException:
-                cfg.roles_channel_id = None
-                cfg.roles_message_id = None
-                session.commit()
-                msg = "Discord rejected the panel update (check the role emoji)."
-                if old_panel_deleted:
-                    msg += " The old panel was removed."
-                await interaction.response.send_message(msg, ephemeral=True)
-                return
-            
+                except discord.HTTPException:
+                    cfg.roles_channel_id = None
+                    cfg.roles_message_id = None
+                    session.commit()
+                    await interaction.followup.send(
+                        "Discord rejected the panel update (check the role emoji)."
+                        + removed_note, ephemeral=True)
+                    return
+
             cfg.roles_channel_id = channel.id
             cfg.roles_message_id = message.id
             session.commit()
-        
-        msg = f"Roles panel is live in {channel.mention}."
-        if old_panel_deleted:
-            msg += " The old panel was removed."
-        await interaction.response.send_message(msg, ephemeral=True)
+
+        await interaction.followup.send(
+            f"Roles panel is live in {channel.mention}.{removed_note}", ephemeral=True)
 
     @roles_group.command(name="add", description="Add an interest role to the panel")
     async def add(self, interaction: discord.Interaction, role: discord.Role,
                   label: str, emoji: str | None = None) -> None:
+        await interaction.response.defer(ephemeral=True)
         label = label.strip()
         if not label or len(label) > _MAX_LABEL_LEN:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Label must be 1-{_MAX_LABEL_LEN} characters.", ephemeral=True)
             return
         emoji = emoji.strip() if emoji else None
         if emoji and not _valid_emoji(emoji):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Emoji must be a single Unicode emoji or a custom emoji like <:name:id>.",
                 ephemeral=True)
             return
+        reason = _role_rejection(role)
+        if reason:
+            await interaction.followup.send(reason, ephemeral=True)
+            return
         with _session() as session:
             if len(list_interest_roles(session, interaction.guild_id)) >= MAX_PANEL_ROLES:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"The panel supports at most {MAX_PANEL_ROLES} roles.", ephemeral=True)
                 return
             try:
                 row = add_interest_role(session, interaction.guild_id, role.id, label, emoji)
             except IntegrityError:
                 session.rollback()
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "That role is already on the panel.", ephemeral=True)
                 return
             row_id = row.id
             note = await _refresh_panel(interaction.guild, session, interaction.guild_id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Added **{_esc(label)}** (id {row_id}).{note}", ephemeral=True)
 
     @roles_group.command(name="remove", description="Remove an interest role (by id from /roles list)")
     async def remove(self, interaction: discord.Interaction, row_id: int) -> None:
+        await interaction.response.defer(ephemeral=True)
         with _session() as session:
             if not remove_interest_role(session, interaction.guild_id, row_id):
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"No role with id {row_id}. See /roles list.", ephemeral=True)
                 return
             note = await _refresh_panel(interaction.guild, session, interaction.guild_id)
-        await interaction.response.send_message(
-            f"Removed role {row_id}.{note}", ephemeral=True)
+        await interaction.followup.send(f"Removed role {row_id}.{note}", ephemeral=True)
 
     @roles_group.command(name="keyword", description="Add or remove a keyword that pings this role")
     async def keyword(self, interaction: discord.Interaction, row_id: int,
                       action: Literal["add", "remove"], keyword: str) -> None:
+        await interaction.response.defer(ephemeral=True)
         if len(keyword.strip()) > _MAX_KEYWORD_LEN:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Keyword must be at most {_MAX_KEYWORD_LEN} characters.", ephemeral=True)
             return
         with _session() as session:
             row = session.get(InterestRole, row_id)
             if row is None or row.guild_id != interaction.guild_id:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"No role with id {row_id}. See /roles list.", ephemeral=True)
                 return
             label = _esc(row.label)
@@ -296,22 +295,22 @@ class RolesCog(commands.Cog):
                 try:
                     add_keyword(session, row_id, keyword)
                 except ValueError:
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "Keyword can't be empty.", ephemeral=True)
                     return
                 except IntegrityError:
                     session.rollback()
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         f"**{label}** already has the keyword \"{shown}\".", ephemeral=True)
                     return
                 msg = f"Added keyword \"{shown}\" to **{label}**."
             else:
                 if not remove_keyword(session, row_id, keyword):
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         f"No keyword \"{shown}\" on **{label}**.", ephemeral=True)
                     return
                 msg = f"Removed keyword \"{shown}\" from **{label}**."
-        await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(msg, ephemeral=True)
 
     @roles_group.command(name="list", description="List interest roles and their keywords")
     async def list_roles(self, interaction: discord.Interaction) -> None:

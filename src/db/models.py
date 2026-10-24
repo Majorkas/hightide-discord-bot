@@ -116,7 +116,8 @@ class BoardPost(Base):
 
 class InterestRole(Base):
     __tablename__ = "interest_roles"
-    __table_args__ = (UniqueConstraint("guild_id", "role_id"),)
+    # AUTOINCREMENT stops rowid reuse from remapping stale panel buttons to new roles.
+    __table_args__ = (UniqueConstraint("guild_id", "role_id"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     guild_id: Mapped[int] = mapped_column(BigInteger)

@@ -6,6 +6,7 @@ MAX_PANEL_ROLES = 25  # Discord allows 5 rows x 5 buttons per view
 
 
 def build_roles_panel_embed(roles: list[InterestRole]) -> discord.Embed:
+    roles = [r for r in roles if r.enabled is not False]  # unflushed rows have enabled=None
     lines = [f"{(r.emoji + ' ') if r.emoji else ''}**{r.label}** — <@&{r.role_id}>"
              for r in roles]
     return discord.Embed(
@@ -20,6 +21,8 @@ class RolesPanelView(discord.ui.View):
     def __init__(self, roles: list[InterestRole]):
         super().__init__(timeout=None)
         for r in roles:
+            if r.enabled is False:
+                continue
             btn = discord.ui.Button(
                 label=r.label, emoji=r.emoji or None,
                 style=discord.ButtonStyle.secondary,
