@@ -71,9 +71,17 @@ async def scryfall_card(name: str, *, retries: bool = True, timeout: float = 15.
 async def scryfall_card_exact(name: str) -> dict | None:
     """Fetch a card from Scryfall using exact name matching.
 
-    Returns dict with card data on 200, None on 404.
-    Raises httpx.TransportError or httpx.HTTPStatusError for network/5xx errors.
-    Used by Task 9 for wants board card resolution.
+    Args:
+        name: Card name to look up (exact match required)
+
+    Returns:
+        dict with card data on 200, None on 404.
+
+    Raises:
+        httpx.TransportError: Network/connectivity errors (propagate to caller).
+        httpx.HTTPStatusError: 5xx and 429 errors (propagate to caller after retries).
+
+    Used by Task 9 for wants board card resolution. Callers must handle exceptions.
     """
     @retry(
         stop=stop_after_attempt(3),

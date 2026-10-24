@@ -23,7 +23,7 @@ from src.discord_ui.role_views import (
 )
 from src.services.deck_service import build_card_embed, scryfall_card
 
-log = logging.getLogger("hightide")
+log = logging.getLogger("hightide.discord_ui.commands_roles")
 
 _MAX_LABEL_LEN = 60
 _MAX_EMOJI_LEN = 64
@@ -366,15 +366,11 @@ class RolesCog(commands.Cog):
                 ephemeral=True
             )
             return
-        except httpx.HTTPStatusError as e:
-            log.warning(f"Scryfall lookup HTTP error for '{name}': {e}")
-            await interaction.response.send_message(
-                "Scryfall is having trouble — try again shortly.",
-                ephemeral=True
-            )
-            return
-        except Exception as e:
-            log.error(f"Unexpected error in /card for '{name}': {e}")
+        except (httpx.HTTPStatusError, Exception) as e:
+            if isinstance(e, httpx.HTTPStatusError):
+                log.warning(f"Scryfall lookup HTTP error for '{name}': {e}")
+            else:
+                log.error(f"Unexpected error in /card for '{name}': {e}")
             await interaction.response.send_message(
                 "Scryfall is having trouble — try again shortly.",
                 ephemeral=True

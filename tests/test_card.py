@@ -98,8 +98,9 @@ class TestBuildCardEmbed:
 
         # Oracle text portion should be trimmed
         assert len(desc) <= 2000  # Discord embed description limit
-        # Should not contain the full long text
-        assert long_text[:400] not in desc or len(desc) < len(long_text)
+        # Should contain ellipsis and be much shorter than original
+        assert "…" in desc
+        assert len(desc) < len(long_text)
 
     def test_markdown_escaping_in_description(self, scryfall_card_fixture):
         """Dangerous markdown characters in scraped text are escaped."""
@@ -146,12 +147,12 @@ class TestScryfallCardFuzzy:
 
     @pytest.mark.asyncio
     async def test_fuzzy_miss_404_no_suggestion(self):
-        """Fuzzy miss with no suggestion returns None."""
+        """Fuzzy miss 404 returns None (Scryfall 404 has no suggestion field)."""
         with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 404
-            mock_response.json.return_value = {"details": "Not found", "data": {}}
+            mock_response.json.return_value = {"object": "error", "code": "not_found", "status": 404, "details": "Not found"}
             mock_client.get.return_value = mock_response
 
             mock_client_class.return_value.__aenter__.return_value = mock_client
@@ -162,14 +163,16 @@ class TestScryfallCardFuzzy:
 
     @pytest.mark.asyncio
     async def test_fuzzy_miss_with_suggestion(self):
-        """Fuzzy miss 404 includes suggestion in error body if available."""
+        """Fuzzy miss 404 returns None even if body has options."""
         with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 404
             mock_response.json.return_value = {
-                "details": "Ambiguous name",
-                "data": {"options": ["Lightning Bolt", "Chain Lightning"]}
+                "object": "error",
+                "code": "ambiguous",
+                "status": 404,
+                "details": "Ambiguous name"
             }
             mock_client.get.return_value = mock_response
 
@@ -177,13 +180,14 @@ class TestScryfallCardFuzzy:
 
             result = await scryfall_card("Lightni")
 
-            # Fuzzy should return None on 404, but error details are handled by caller
+            # Fuzzy should return None on 404
             assert result is None
 
     @pytest.mark.asyncio
     async def test_network_error_propagates(self):
         """Network/transport error propagates (with retries=True)."""
-        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.TransportError("Network error")
             mock_client_class.return_value.__aenter__.return_value = mock_client
@@ -194,11 +198,17 @@ class TestScryfallCardFuzzy:
     @pytest.mark.asyncio
     async def test_5xx_error_propagates(self):
         """5xx errors propagate after retries (with retries=True)."""
-        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 503
-            mock_client.get.side_effect = httpx.HTTPStatusError("503", request=MagicMock(), response=mock_response)
+            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "503", request=MagicMock(), response=mock_response
+            )
+            mock_client.get.side_effect = httpx.HTTPStatusError(
+                "503", request=MagicMock(), response=mock_response
+            )
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(httpx.HTTPStatusError):
@@ -239,8 +249,8 @@ class TestScryfallCardFuzzy:
 
             # Check headers in call
             call_args = mock_client.get.call_args
-            if "headers" in call_args[1]:
-                assert "hightide-events-bot/0.2" in str(call_args[1]["headers"])
+            assert "headers" in call_args[1], "headers kwarg must be present"
+            assert "hightide-events-bot/0.2" in str(call_args[1]["headers"]), "UA must be present"
 
 
 class TestScryfallCardExact:
@@ -311,7 +321,7 @@ class TestDoubleFacedRichness:
 
         front_cost = card["card_faces"][0].get("mana_cost", "")
         # Should contain the front face mana cost
-        assert front_cost in desc or len(desc) > 0
+        assert front_cost in desc, f"Expected '{front_cost}' in description, got: {desc}"
 
     def test_dfc_uses_front_face_oracle_text(self, scryfall_dfc_fixture):
         """DFC with empty oracle_text uses card_faces[0].oracle_text."""
@@ -322,8 +332,7 @@ class TestDoubleFacedRichness:
 
         front_oracle = card["card_faces"][0].get("oracle_text", "")
         # Should contain front face text (at least part of it)
-        if front_oracle:
-            assert front_oracle[:50] in desc or len(desc) > 0
+        assert front_oracle in desc, f"Expected oracle text in description, got: {desc}"
 
 
 class TestRetryPolicies:
@@ -351,10 +360,7 @@ class TestRetryPolicies:
     async def test_5xx_retries_three_times_when_enabled(self):
         """5xx error with retries=True attempts 3 times."""
         with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class, \
-             patch("src.services.deck_service.wait_exponential") as mock_wait, \
-             patch("src.services.deck_service.wait_exponential.min") as mock_min, \
-             patch("tenacity.sleep") as mock_sleep:
-
+             patch("asyncio.sleep", new_callable=AsyncMock):
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 503
@@ -364,7 +370,6 @@ class TestRetryPolicies:
             mock_client.get.side_effect = httpx.HTTPStatusError(
                 "503", request=MagicMock(), response=mock_response
             )
-
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             try:
@@ -514,3 +519,141 @@ class TestCommandSurface:
         card_cmd = commands.get("card")
         assert card_cmd is not None
         assert card_cmd.guild_only is True
+
+
+class TestCardCommandHandler:
+    """Test /card command handler behavior."""
+
+    @pytest.mark.asyncio
+    async def test_card_success_sends_public_embed(self, scryfall_card_fixture):
+        """Success case sends embed non-ephemeral (public)."""
+        from src.discord_ui.commands_roles import RolesCog
+        
+        mock_interaction = AsyncMock(spec=discord.Interaction)
+        mock_interaction.response = AsyncMock()
+        
+        cog = RolesCog(AsyncMock())
+        
+        with patch("src.discord_ui.commands_roles.scryfall_card") as mock_card:
+            mock_card.return_value = scryfall_card_fixture
+            
+            # Get the callback from the Command object
+            callback = cog.card_lookup.callback
+            await callback(cog, mock_interaction, "Lightning Bolt")
+            
+            # Should call send_message with embed and ephemeral=False
+            mock_interaction.response.send_message.assert_called_once()
+            call_kwargs = mock_interaction.response.send_message.call_args[1]
+            assert "embed" in call_kwargs
+            assert call_kwargs.get("ephemeral") is False
+
+    @pytest.mark.asyncio
+    async def test_card_404_sends_ephemeral_error(self):
+        """404 (None result) sends ephemeral error message."""
+        from src.discord_ui.commands_roles import RolesCog
+        
+        mock_interaction = AsyncMock(spec=discord.Interaction)
+        mock_interaction.response = AsyncMock()
+        
+        cog = RolesCog(AsyncMock())
+        
+        with patch("src.discord_ui.commands_roles.scryfall_card") as mock_card:
+            mock_card.return_value = None
+            
+            callback = cog.card_lookup.callback
+            await callback(cog, mock_interaction, "Nonexistent Card")
+            
+            # Should send ephemeral error
+            mock_interaction.response.send_message.assert_called_once()
+            call_args = mock_interaction.response.send_message.call_args
+            assert "No card found" in str(call_args)
+            assert call_args[1].get("ephemeral") is True
+
+    @pytest.mark.asyncio
+    async def test_card_transport_error_sends_ephemeral_error(self):
+        """TransportError sends ephemeral error message."""
+        from src.discord_ui.commands_roles import RolesCog
+        
+        mock_interaction = AsyncMock(spec=discord.Interaction)
+        mock_interaction.response = AsyncMock()
+        
+        cog = RolesCog(AsyncMock())
+        
+        with patch("src.discord_ui.commands_roles.scryfall_card") as mock_card:
+            mock_card.side_effect = httpx.TransportError("Network down")
+            
+            callback = cog.card_lookup.callback
+            await callback(cog, mock_interaction, "Lightning Bolt")
+            
+            # Should send ephemeral error
+            mock_interaction.response.send_message.assert_called_once()
+            call_args = mock_interaction.response.send_message.call_args
+            assert "having trouble" in str(call_args).lower()
+            assert call_args[1].get("ephemeral") is True
+
+    @pytest.mark.asyncio
+    async def test_card_http_error_sends_ephemeral_error(self):
+        """HTTPStatusError sends ephemeral error message."""
+        from src.discord_ui.commands_roles import RolesCog
+        
+        mock_interaction = AsyncMock(spec=discord.Interaction)
+        mock_interaction.response = AsyncMock()
+        
+        cog = RolesCog(AsyncMock())
+        
+        with patch("src.discord_ui.commands_roles.scryfall_card") as mock_card:
+            mock_response = MagicMock()
+            mock_card.side_effect = httpx.HTTPStatusError("500", request=MagicMock(), response=mock_response)
+            
+            callback = cog.card_lookup.callback
+            await callback(cog, mock_interaction, "Lightning Bolt")
+            
+            # Should send ephemeral error
+            mock_interaction.response.send_message.assert_called_once()
+            call_args = mock_interaction.response.send_message.call_args
+            assert "having trouble" in str(call_args).lower()
+            assert call_args[1].get("ephemeral") is True
+
+    @pytest.mark.asyncio
+    async def test_card_name_too_long_sends_ephemeral_error(self):
+        """Name > 100 chars sends ephemeral error without calling service."""
+        from src.discord_ui.commands_roles import RolesCog
+        
+        mock_interaction = AsyncMock(spec=discord.Interaction)
+        mock_interaction.response = AsyncMock()
+        
+        cog = RolesCog(AsyncMock())
+        
+        with patch("src.discord_ui.commands_roles.scryfall_card") as mock_card:
+            long_name = "A" * 101
+            
+            callback = cog.card_lookup.callback
+            await callback(cog, mock_interaction, long_name)
+            
+            # Should NOT call scryfall_card
+            mock_card.assert_not_called()
+            
+            # Should send ephemeral error
+            mock_interaction.response.send_message.assert_called_once()
+            call_args = mock_interaction.response.send_message.call_args
+            assert "100" in str(call_args)
+            assert call_args[1].get("ephemeral") is True
+
+    @pytest.mark.asyncio
+    async def test_card_interaction_always_acknowledged(self):
+        """Interaction response is always sent (no unacknowledged interactions)."""
+        from src.discord_ui.commands_roles import RolesCog
+        
+        mock_interaction = AsyncMock(spec=discord.Interaction)
+        mock_interaction.response = AsyncMock()
+        
+        cog = RolesCog(AsyncMock())
+        
+        with patch("src.discord_ui.commands_roles.scryfall_card") as mock_card:
+            mock_card.return_value = None
+            
+            callback = cog.card_lookup.callback
+            await callback(cog, mock_interaction, "Test")
+            
+            # Response should always be called
+            assert mock_interaction.response.send_message.called, "Interaction should always be acknowledged"
