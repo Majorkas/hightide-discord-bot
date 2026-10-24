@@ -149,3 +149,14 @@ class EventRolePing(Base):
     event_id: Mapped[int] = mapped_column(Integer)
     interest_role_id: Mapped[int] = mapped_column(Integer)
     pinged_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+
+
+class EventSignup(Base):
+    __tablename__ = "event_signups"
+    __table_args__ = (UniqueConstraint("event_id", "user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    event_id: Mapped[int] = mapped_column(Integer)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    signed_up_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)

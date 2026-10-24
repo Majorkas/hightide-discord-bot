@@ -4,7 +4,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.models import BoardPost, Event, EventRolePing, EventSource, GuildConfig, InterestRole, RoleKeyword
+from src.db.models import BoardPost, Event, EventRolePing, EventSource, EventSignup, GuildConfig, InterestRole, RoleKeyword
 
 
 def get_or_create_config(session: Session, guild_id: int) -> GuildConfig:
@@ -160,3 +160,9 @@ def record_ping(session: Session, guild_id: int, event_id: int, interest_role_id
         session.commit()
     except IntegrityError:
         session.rollback()  # concurrent record of the same ping
+
+
+def get_event_by_id(session: Session, guild_id: int, event_id: int) -> Event | None:
+    """Get an event by its internal id and guild id."""
+    stmt = select(Event).where(Event.guild_id == guild_id, Event.id == event_id)
+    return session.execute(stmt).scalar_one_or_none()
