@@ -187,7 +187,10 @@ class RefreshScheduler:
                 self._retry_delay[guild_id] = _RETRY_INTERVAL
                 self._next_attempt[guild_id] = None
                 failed = False
-                # Outside the has_error scan above, so a tonight failure never drives backoff.
+            events_ok = isinstance(result.get("events"), dict) or result.get("events") == "cached"
+            if events_ok:
+                # Gated on the events step only (a board failure must not suppress it) and
+                # kept out of the has_error scan, so a tonight failure never drives backoff.
                 try:
                     session.expire_all()
                     result["tonight"] = await _post_tonight(
