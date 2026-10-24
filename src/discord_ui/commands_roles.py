@@ -42,9 +42,41 @@ def _esc(text: str) -> str:
 
 
 def _valid_emoji(emoji: str) -> bool:
+    """Accept only custom emoji (<:name:id> or <a:name:id>) or Unicode emoji grapheme(s).
+    Reject non-emoji Unicode like é, 日本, mixed text like Hi😀, or plain ASCII like ab."""
     if len(emoji) > _MAX_EMOJI_LEN:
         return False
-    return discord.PartialEmoji.from_str(emoji).id is not None or not emoji.isascii()
+    # Custom emoji: <:name:id> or <a:name:id>
+    if emoji.startswith('<') and emoji.endswith('>'):
+        import re
+        return bool(re.match(r'^<a?:[\w-]+:\d+>$', emoji))
+    # Reject pure ASCII (catches "ab", "abc")
+    if emoji.isascii():
+        return False
+    # For Unicode, verify at least one char is from emoji blocks and no stray letters mixed in.
+    # Allows emoji sequences with variation selectors, ZWJ, modifiers.
+    emoji_codepoint_ranges = [
+        (0x1F300, 0x1F9FF),  # Main emoji blocks (emoticons, symbols, transport, etc.)
+        (0x2600, 0x27BF),    # Miscellaneous symbols and dingbats
+        (0x1F1E6, 0x1F1FF),  # Regional indicators for flags
+        (0x2300, 0x23FF),    # Miscellaneous technical
+    ]
+    allowed_helper_ranges = [
+        (0x20D0, 0x20FF),    # Combining diacritical marks
+        (0xFE00, 0xFE0F),    # Variation selectors
+        (0x200D, 0x200D),    # Zero-width joiner
+        (0x1F3FB, 0x1F3FF),  # Emoji modifiers (skin tones)
+    ]
+    has_emoji_codepoint = False
+    for char in emoji:
+        ord_val = ord(char)
+        if any(start <= ord_val <= end for start, end in emoji_codepoint_ranges):
+            has_emoji_codepoint = True
+        elif not any(start <= ord_val <= end for start, end in allowed_helper_ranges):
+            # Stray character not in emoji range and not a helper (e.g., regular letter)
+            # Rejects é, 日本, Hi😀
+            return False
+    return has_emoji_codepoint
 
 
 async def _refresh_panel(guild: discord.Guild, session: Session, guild_id: int) -> str:
@@ -61,6 +93,8 @@ async def _refresh_panel(guild: discord.Guild, session: Session, guild_id: int) 
             message = None
         except discord.Forbidden:
             return _PANEL_FORBIDDEN_NOTE
+        except discord.HTTPException:
+            return _PANEL_FAILED_NOTE
     if message is None:
         cfg.roles_channel_id = None
         cfg.roles_message_id = None
@@ -77,6 +111,9 @@ async def _refresh_panel(guild: discord.Guild, session: Session, guild_id: int) 
         session.commit()
         return _PANEL_GONE_NOTE
     except discord.HTTPException:
+        cfg.roles_channel_id = None
+        cfg.roles_message_id = None
+        session.commit()
         return _PANEL_FAILED_NOTE
     return ""
 
@@ -99,29 +136,91 @@ class RolesCog(commands.Cog):
             roles = list_interest_roles(session, interaction.guild_id)
             embed = build_roles_panel_embed(roles)
             view = RolesPanelView(roles)
+            
+            # Delete old panel if switching to a different channel
+            old_panel_deleted = False
+            if cfg.roles_message_id and cfg.roles_channel_id and cfg.roles_channel_id != channel.id:
+                old_channel = interaction.guild.get_channel(cfg.roles_channel_id)
+                if old_channel is not None:
+                    try:
+                        old_msg = await old_channel.fetch_message(cfg.roles_message_id)
+                        await old_msg.delete()
+                        old_panel_deleted = True
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        pass  # Best-effort cleanup
+            
+            http_error = None  # Track HTTPException to handle separately from NotFound
+            http_error_type = None
             try:
                 message = None
+                # Try to fetch existing message in the target channel
                 if cfg.roles_message_id and cfg.roles_channel_id == channel.id:
                     try:
                         message = await channel.fetch_message(cfg.roles_message_id)
                     except discord.NotFound:
                         message = None
-                if message is not None:
+                    except discord.Forbidden as e:
+                        http_error = e
+                        http_error_type = "forbidden"
+                    except discord.HTTPException as e:
+                        http_error = e
+                        http_error_type = "http"
+                
+                # Try to edit existing message if found and no HTTP error
+                if message is not None and http_error is None:
                     try:
                         await message.edit(embed=embed, view=view)
                     except discord.NotFound:
                         message = None
+                    except discord.Forbidden as e:
+                        http_error = e
+                        http_error_type = "forbidden"
+                    except discord.HTTPException as e:
+                        http_error = e
+                        http_error_type = "http"
+                
+                # If we got an HTTP error during fetch/edit, clear IDs and error out
+                if http_error:
+                    cfg.roles_channel_id = None
+                    cfg.roles_message_id = None
+                    session.commit()
+                    if http_error_type == "forbidden":
+                        msg = f"I don't have permission to access the panel — check my channel permissions."
+                    else:
+                        msg = "Discord rejected the panel update (check the role emoji)."
+                    if old_panel_deleted:
+                        msg += " The old panel was removed."
+                    await interaction.response.send_message(msg, ephemeral=True)
+                    return
+                
+                # Send new message if edit failed or didn't exist
                 if message is None:
                     message = await channel.send(embed=embed, view=view)
             except discord.Forbidden:
+                cfg.roles_channel_id = None
+                cfg.roles_message_id = None
+                session.commit()
                 await interaction.response.send_message(
                     f"I don't have permission to post in {channel.mention}.", ephemeral=True)
                 return
+            except discord.HTTPException:
+                cfg.roles_channel_id = None
+                cfg.roles_message_id = None
+                session.commit()
+                msg = "Discord rejected the panel update (check the role emoji)."
+                if old_panel_deleted:
+                    msg += " The old panel was removed."
+                await interaction.response.send_message(msg, ephemeral=True)
+                return
+            
             cfg.roles_channel_id = channel.id
             cfg.roles_message_id = message.id
             session.commit()
-        await interaction.response.send_message(
-            f"Roles panel is live in {channel.mention}.", ephemeral=True)
+        
+        msg = f"Roles panel is live in {channel.mention}."
+        if old_panel_deleted:
+            msg += " The old panel was removed."
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @roles_group.command(name="add", description="Add an interest role to the panel")
     async def add(self, interaction: discord.Interaction, role: discord.Role,

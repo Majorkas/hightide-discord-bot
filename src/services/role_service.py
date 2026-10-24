@@ -46,3 +46,6 @@ async def handle_role_toggle(interaction: discord.Interaction, role_row_id: int)
         await interaction.response.send_message(
             "I can't manage that role (check my role sits above it). Tell an admin.",
             ephemeral=True)
+    except discord.HTTPException:
+        await interaction.response.send_message(
+            "Something went wrong — try again.", ephemeral=True)

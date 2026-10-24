@@ -168,7 +168,9 @@ async def test_setup_forbidden_fetch_replies_error(db, cog, interaction, channel
     channel.fetch_message.side_effect = _http_error(discord.Forbidden)
     await cog.setup.callback(cog, interaction, channel)
     channel.send.assert_not_awaited()
-    assert "permission" in _reply(interaction).lower()
+    reply = _reply(interaction)
+    assert "permission" in reply.lower()
+    assert _cfg(db).roles_message_id is None
 
 
 async def test_setup_forbidden_send_replies_error(db, cog, interaction, channel):
@@ -180,6 +182,10 @@ async def test_setup_forbidden_send_replies_error(db, cog, interaction, channel)
 
 async def test_setup_other_channel_posts_new(db, cog, interaction, channel):
     _set_panel(db, channel_id=777)
+    # Mock get_channel to return None for the old channel (777)
+    def get_channel_fn(cid):
+        return channel if cid == 555 else None
+    interaction.guild.get_channel = MagicMock(side_effect=get_channel_fn)
     await cog.setup.callback(cog, interaction, channel)
     channel.fetch_message.assert_not_awaited()
     channel.send.assert_awaited_once()
@@ -519,3 +525,134 @@ def test_register_persistent_views_none(db):
     bot = MagicMock()
     register_persistent_views(bot, db)
     bot.add_view.assert_not_called()
+
+
+# ---- emoji validation ----
+
+@pytest.mark.parametrize("bad_emoji", ["é", "日本", "Hi😀", "ab", "abc"])
+async def test_add_invalid_emoji_not_persisted(db, cog, interaction, bad_emoji):
+    """Invalid emoji strings (accents, CJK, mixed, ASCII) must be rejected without persisting."""
+    await cog.add.callback(cog, interaction, _role(11), "Test", bad_emoji)
+    assert "emoji" in _reply(interaction).lower()
+    with db() as s:
+        assert list_interest_roles(s, GUILD) == []
+
+
+@pytest.mark.parametrize("good_emoji", ["😀", "🎴", "🚀", "🏳️‍🌈"])
+async def test_add_valid_unicode_emoji_accepted(db, cog, interaction, good_emoji):
+    """Valid Unicode emoji graphemes must be accepted and persisted."""
+    await cog.add.callback(cog, interaction, _role(11), "Test", good_emoji)
+    with db() as s:
+        rows = list_interest_roles(s, GUILD)
+    assert len(rows) == 1 and rows[0].emoji == good_emoji
+
+
+async def test_setup_httpexception_on_edit_clears_ids(db, cog, interaction, channel):
+    """HTTPException on message.edit during setup must clear panel IDs and reply with error."""
+    _set_panel(db)
+    msg = _panel_message()
+    msg.edit.side_effect = _http_error(discord.HTTPException)
+    channel.fetch_message.return_value = msg
+    await cog.setup.callback(cog, interaction, channel)
+    reply = _reply(interaction)
+    assert "rejected" in reply.lower()
+    cfg = _cfg(db)
+    assert cfg.roles_message_id is None and cfg.roles_channel_id is None
+
+
+async def test_setup_httpexception_on_send_clears_ids(db, cog, interaction, channel):
+    """HTTPException on channel.send during setup must clear panel IDs and reply with error."""
+    channel.send.side_effect = _http_error(discord.HTTPException)
+    await cog.setup.callback(cog, interaction, channel)
+    reply = _reply(interaction)
+    assert "rejected" in reply.lower()
+    cfg = _cfg(db)
+    assert cfg.roles_message_id is None
+
+
+async def test_toggle_httpexception_replies_error(db):
+    """HTTPException during role toggle must reply with generic error message."""
+    with db() as s:
+        rid = add_interest_role(s, GUILD, 11, "MTG").id
+    i = _toggle_interaction(object(), [])
+    i.user.add_roles.side_effect = _http_error(discord.HTTPException)
+    await role_service.handle_role_toggle(i, rid)
+    reply = i.response.send_message.call_args.args[0]
+    assert "something went wrong" in reply.lower()
+
+
+async def test_setup_channel_change_deletes_old_panel(db, cog, interaction):
+    """When changing to a different channel, the old panel message must be deleted first."""
+    # Setup initial panel in channel 555
+    _set_panel(db, channel_id=555, message_id=999)
+    
+    # Switch to channel 666
+    new_channel = MagicMock()
+    new_channel.id = 666
+    new_channel.mention = "<#666>"
+    new_channel.send = AsyncMock(return_value=SimpleNamespace(id=1111))
+    
+    old_channel = MagicMock()
+    old_channel.id = 555
+    old_msg = MagicMock()
+    old_msg.delete = AsyncMock()
+    
+    # Setup guild to return both channels
+    def get_channel_fn(cid):
+        if cid == 555:
+            return old_channel
+        elif cid == 666:
+            return new_channel
+        return None
+    
+    interaction.guild.get_channel = MagicMock(side_effect=get_channel_fn)
+    
+    # Mock fetch_message to return old panel
+    async def fetch_old(msg_id):
+        if msg_id == 999:
+            return old_msg
+        raise discord.NotFound(MagicMock(status=404), "x")
+    
+    old_channel.fetch_message = AsyncMock(side_effect=fetch_old)
+    
+    await cog.setup.callback(cog, interaction, new_channel)
+    
+    # Verify old panel was deleted
+    old_msg.delete.assert_awaited_once()
+    
+    # Verify new panel was posted
+    new_channel.send.assert_awaited_once()
+    
+    # Verify reply mentions old panel was removed
+    reply = _reply(interaction)
+    assert "old panel was removed" in reply.lower()
+    
+    # Verify config was updated to new channel
+    cfg = _cfg(db)
+    assert cfg.roles_channel_id == 666
+    assert cfg.roles_message_id == 1111
+
+
+async def test_setup_channel_change_handles_old_panel_not_found(db, cog, interaction):
+    """When old panel can't be fetched/deleted, setup should still proceed."""
+    _set_panel(db, channel_id=555, message_id=999)
+    
+    new_channel = MagicMock()
+    new_channel.id = 666
+    new_channel.mention = "<#666>"
+    new_channel.send = AsyncMock(return_value=SimpleNamespace(id=1111))
+    
+    old_channel = MagicMock()
+    old_channel.fetch_message = AsyncMock(side_effect=_http_error(discord.NotFound))
+    
+    def get_channel_fn(cid):
+        return old_channel if cid == 555 else new_channel
+    
+    interaction.guild.get_channel = MagicMock(side_effect=get_channel_fn)
+    
+    await cog.setup.callback(cog, interaction, new_channel)
+    
+    # Setup should succeed despite old panel not found
+    new_channel.send.assert_awaited_once()
+    cfg = _cfg(db)
+    assert cfg.roles_channel_id == 666
