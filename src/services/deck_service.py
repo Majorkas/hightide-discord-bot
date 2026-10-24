@@ -422,7 +422,7 @@ async def fetch_deck(url: str, *, retries: bool = True, timeout: float = 15.0) -
     if parsed is None:
         return None
     source, deck_id = parsed
-    api = (f"https://api2.moxfield.com/v2/decklists/{deck_id}" if source == "Moxfield"
+    api = (f"https://api2.moxfield.com/v2/decks/all/{deck_id}" if source == "Moxfield"
            else f"https://archidekt.com/api/decks/{deck_id}/")
 
     started = _monotonic()

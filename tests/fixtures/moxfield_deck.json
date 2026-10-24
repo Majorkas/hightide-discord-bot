@@ -1,19 +1,125 @@
 {
- "id": "oEWXWHM5eEGMmopExLWRCA",
- "name": "Atraxa, Praetors' Voice [Test]",
+ "publicId": "_1xlt0eAuEmUeV1DMleOQA",
+ "name": "Mothman",
  "format": "commander",
- "publicUrl": "https://www.moxfield.com/decks/oEWXWHM5eEGMmopExLWRCA",
  "mainboardCount": 99,
  "commandersCount": 1,
- "sideboardCount": 0,
  "commanders": {
-  "Atraxa, Praetors' Voice": {
+  "The Wise Mothman": {
    "quantity": 1,
    "card": {
-    "id": "abc",
-    "name": "Atraxa, Praetors' Voice",
-    "scryfall_id": "d0d33d52-3d28-4635-b985-51e126289259"
+    "name": "The Wise Mothman",
+    "scryfall_id": "3d6d6944-a364-41c2-b824-7a1bf6ad0d1e",
+    "type_line": "Legendary Creature \u2014 Insect Mutant",
+    "mana_cost": "{1}{B}{G}{U}",
+    "prices": {
+     "usd_foil": 1.86,
+     "eur_foil": 1.09,
+     "tix": 5.0,
+     "ck_foil": 0.99,
+     "lastUpdatedAtUtc": "2026-10-24T00:14:20.056Z",
+     "ck_buy_foil": 0.15,
+     "ck_buy_foil_qty": 0,
+     "csi_foil": 1.99,
+     "csi_buy_foil": 0.5,
+     "csi_buy_foil_qty": 20,
+     "ct": 1.03,
+     "ct_foil": 1.03,
+     "scg_foil": 1.49,
+     "scg_foil_qty": 8,
+     "scg_foil_buy": 0.1,
+     "mp_foil": 1.02,
+     "mp_qty": 129
+    }
    }
   }
- }
+ },
+ "mainboard": {
+  "Island": {
+   "quantity": 5,
+   "card": {
+    "name": "Island",
+    "scryfall_id": "a5b0a88d-7049-4206-8085-4a68ab0bfd81",
+    "type_line": "Basic Land \u2014 Island",
+    "mana_cost": "",
+    "prices": {
+     "usd": 0.3,
+     "usd_foil": 2.32,
+     "eur": 0.2,
+     "eur_foil": 1.59,
+     "tix": 0.04,
+     "ck": 0.49,
+     "ck_foil": 1.49,
+     "lastUpdatedAtUtc": "2026-10-24T00:14:20.056Z",
+     "ck_buy": 0.03,
+     "ck_buy_foil": 0.38,
+     "ck_buy_qty": 0,
+     "ck_buy_foil_qty": 0,
+     "csi": 0.49,
+     "csi_foil": 2.49,
+     "csi_buy": 0.0,
+     "csi_buy_foil": 0.0,
+     "csi_buy_qty": 0,
+     "csi_buy_foil_qty": 0,
+     "ct": 0.24,
+     "ct_foil": 2.14,
+     "scg": 0.49,
+     "scg_foil": 2.49,
+     "scg_qty": 50,
+     "scg_foil_qty": 0,
+     "scg_buy": 0.01,
+     "scg_foil_buy": 0.5,
+     "mp": 0.15,
+     "mp_foil": 1.47,
+     "mp_qty": 2107
+    }
+   }
+  },
+  "Forest": {
+   "quantity": 5,
+   "card": {
+    "name": "Forest",
+    "scryfall_id": "be13351c-ca20-410c-8959-bbaa59816002",
+    "type_line": "Basic Land \u2014 Forest",
+    "mana_cost": "",
+    "prices": {
+     "usd": 0.34,
+     "usd_foil": 2.65,
+     "eur": 0.17,
+     "eur_foil": 1.86,
+     "tix": 0.04,
+     "ck": 0.49,
+     "ck_foil": 2.99,
+     "lastUpdatedAtUtc": "2026-10-24T00:14:20.056Z",
+     "ck_buy": 0.03,
+     "ck_buy_foil": 0.9,
+     "ck_buy_qty": 0,
+     "ck_buy_foil_qty": 7,
+     "csi": 0.49,
+     "csi_foil": 3.49,
+     "csi_buy": 0.0,
+     "csi_buy_foil": 0.0,
+     "csi_buy_qty": 0,
+     "csi_buy_foil_qty": 0,
+     "ct": 0.24,
+     "ct_foil": 3.5,
+     "scg": 0.49,
+     "scg_foil": 2.99,
+     "scg_qty": 50,
+     "scg_foil_qty": 0,
+     "scg_buy": 0.01,
+     "scg_foil_buy": 0.5,
+     "mp": 0.15,
+     "mp_foil": 1.23,
+     "mp_qty": 1152
+    }
+   }
+  }
+ },
+ "createdByUser": {
+  "userName": "Nitro_x",
+  "displayName": "Nitro_x",
+  "badges": []
+ },
+ "publicUrl": "https://moxfield.com/decks/_1xlt0eAuEmUeV1DMleOQA"
 }

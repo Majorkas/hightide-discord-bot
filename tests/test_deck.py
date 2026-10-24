@@ -13,8 +13,8 @@ from src.services.deck_service import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
-MOX_ID = "oEWXWHM5eEGMmopExLWRCA"
-SFID = "d0d33d52-3d28-4635-b985-51e126289259"
+MOX_ID = "_1xlt0eAuEmUeV1DMleOQA"
+SFID = "3d6d6944-a364-41c2-b824-7a1bf6ad0d1e"
 
 
 def _load(name):
@@ -98,7 +98,7 @@ class TestParseDeckUrl:
         "https://archidekt.com/decks/abc",
         "https://archidekt.com/decks/",
         "https://archidekt.com/api/decks/123/",
-        "https://api2.moxfield.com/v2/decklists/abc",
+        "https://api2.moxfield.com/v2/decks/all/abc",
     ])
     def test_invalid(self, url):
         assert parse_deck_url(url) is None
@@ -187,10 +187,10 @@ class TestFetchDeckMoxfield:
         assert d.card_count == 100
         assert d.source == "Moxfield"
         assert d.url == f"https://moxfield.com/decks/{MOX_ID}"
-        assert d.commander == "Atraxa, Praetors' Voice"
+        assert d.commander == "The Wise Mothman"
         assert d.image_url == scry["image_uris"]["normal"]
         urls = [c[0][0] for c in client.get.call_args_list]
-        assert urls == [f"https://api2.moxfield.com/v2/decklists/{MOX_ID}",
+        assert urls == [f"https://api2.moxfield.com/v2/decks/all/{MOX_ID}",
                         f"https://api.scryfall.com/cards/{SFID}"]
         for c in client.get.call_args_list:
             assert c[1]["headers"]["User-Agent"] == "hightide-events-bot/0.2"
@@ -215,7 +215,7 @@ class TestFetchDeckMoxfield:
         finally:
             p.stop()
         assert d.title == mox["name"] and d.image_url is None
-        assert d.commander == "Atraxa, Praetors' Voice"
+        assert d.commander == "The Wise Mothman"
 
     async def test_scryfall_failure_is_best_effort(self, mox):
         p, _ = _client(side_effect=[_resp(200, mox), httpx.TransportError("down")])
@@ -858,7 +858,7 @@ class TestImageBudget:
     async def test_remaining_just_below_min_budget_skips_lookup(self, mox, scry):
         d, client = await self._run(mox, scry, 2.2501, retries=False)
         assert client.get.call_count == 1
-        assert d.image_url is None and d.commander == "Atraxa, Praetors' Voice"
+        assert d.image_url is None and d.commander == "The Wise Mothman"
 
     async def test_negative_remaining_skips_lookup(self, mox, scry):
         _, client = await self._run(mox, scry, 10.0, retries=False)
@@ -948,7 +948,7 @@ class TestMoxfieldSummaryRobustness:
         self._cmdr(mox)["scryfall_id"] = sfid
         d, client = await self._deck(mox)
         assert d.image_url is None and client.get.call_count == 1
-        assert d.commander == "Atraxa, Praetors' Voice"
+        assert d.commander == "The Wise Mothman"
 
     async def test_missing_scryfall_id_skips_lookup(self, mox):
         del self._cmdr(mox)["scryfall_id"]
