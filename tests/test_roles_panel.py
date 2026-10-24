@@ -656,3 +656,48 @@ async def test_setup_channel_change_handles_old_panel_not_found(db, cog, interac
     new_channel.send.assert_awaited_once()
     cfg = _cfg(db)
     assert cfg.roles_channel_id == 666
+
+# ---- emoji validator ----
+
+@pytest.mark.parametrize("emoji,expected", [
+    # Standard emojis
+    ("😀", True),
+    ("🎴", True),
+    # Extended ranges - arrows and symbols
+    ("⭐", True),  # U+2B50
+    ("⬅️", True),  # U+2B05 + FE0F
+    # Newer emoji ranges
+    ("🫡", True),  # U+1FA71
+    ("🩷", True),  # U+1FA77
+    # Keycap sequences
+    ("1️⃣", True),  # 1 + FE0F + 20E3
+    ("2️⃣", True),  # 2 + FE0F + 20E3
+    ("#️⃣", True),  # # + FE0F + 20E3
+    ("*️⃣", True),  # * + FE0F + 20E3
+    ("0️⃣", True),  # keycap digit zero
+    # Special symbols with variation selectors
+    ("©️", True),  # U+00A9 + FE0F
+    ("®️", True),  # U+00AE + FE0F
+    ("™️", True),  # U+2122 + FE0F
+    # Flag sequences
+    ("🏳️‍🌈", True),  # Flag + ZWJ + rainbow
+    # Custom Discord emoji
+    ("<:a:1>", True),
+    ("<:name:123456>", True),
+    ("<a:b:12>", True),
+    ("<a:animated_emoji:987654>", True),
+    # Rejects
+    ("é", False),  # Latin letter + diacritic
+    ("日本", False),  # CJK text
+    ("Hi😀", False),  # Mixed text with emoji
+    ("ab", False),  # Plain ASCII
+    ("hello", False),  # ASCII string
+    ("hello world", False),  # Multi-word ASCII
+    ("", False),  # Empty string
+    ("123", False),  # Pure digits
+    ("<:broken", False),  # Malformed custom emoji
+    ("<:broken:>", False),  # Missing ID
+    ("<:broken:abc>", False),  # Non-numeric ID
+])
+def test_valid_emoji(emoji, expected):
+    assert commands_roles._valid_emoji(emoji) == expected

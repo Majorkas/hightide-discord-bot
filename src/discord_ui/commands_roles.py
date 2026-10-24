@@ -1,3 +1,4 @@
+import re
 from typing import Literal
 
 import discord
@@ -48,19 +49,26 @@ def _valid_emoji(emoji: str) -> bool:
         return False
     # Custom emoji: <:name:id> or <a:name:id>
     if emoji.startswith('<') and emoji.endswith('>'):
-        import re
         return bool(re.match(r'^<a?:[\w-]+:\d+>$', emoji))
     # Reject pure ASCII (catches "ab", "abc")
     if emoji.isascii():
         return False
+    # Keycap sequences: digit/# /* + optional variation selector + combining enclosing keycap
+    if re.match(r'^[0-9#*]\uFE0F?\u20E3$', emoji):
+        return True
     # For Unicode, verify at least one char is from emoji blocks and no stray letters mixed in.
     # Allows emoji sequences with variation selectors, ZWJ, modifiers.
     emoji_codepoint_ranges = [
         (0x1F300, 0x1F9FF),  # Main emoji blocks (emoticons, symbols, transport, etc.)
         (0x2600, 0x27BF),    # Miscellaneous symbols and dingbats
+        (0x2B00, 0x2BFF),    # Miscellaneous symbols and arrows (⭐, ⬅️)
         (0x1F1E6, 0x1F1FF),  # Regional indicators for flags
         (0x2300, 0x23FF),    # Miscellaneous technical
+        (0x1FA00, 0x1FAFF),  # Newer emoji (🫡, 🩷)
     ]
+    # Special symbol bases that may have optional variation selector
+    special_chars = {0x00A9, 0x00AE, 0x203C, 0x2049, 0x2122, 0x2139}
+    # Helper ranges (variation selectors, ZWJ, skin tone modifiers, combining marks)
     allowed_helper_ranges = [
         (0x20D0, 0x20FF),    # Combining diacritical marks
         (0xFE00, 0xFE0F),    # Variation selectors
@@ -70,8 +78,13 @@ def _valid_emoji(emoji: str) -> bool:
     has_emoji_codepoint = False
     for char in emoji:
         ord_val = ord(char)
+        # Check main emoji ranges
         if any(start <= ord_val <= end for start, end in emoji_codepoint_ranges):
             has_emoji_codepoint = True
+        # Check special symbol bases
+        elif ord_val in special_chars:
+            has_emoji_codepoint = True
+        # Check helper ranges
         elif not any(start <= ord_val <= end for start, end in allowed_helper_ranges):
             # Stray character not in emoji range and not a helper (e.g., regular letter)
             # Rejects é, 日本, Hi😀
