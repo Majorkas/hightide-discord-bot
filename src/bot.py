@@ -66,6 +66,8 @@ def create_bot() -> commands.Bot:
         ensure_guild_config_weekly_seeded(engine)
         ensure_guild_config_v2_columns(engine)
         register_persistent_views(bot, get_session_factory(config.DATABASE_URL))
+        from src.discord_ui.role_views import SignupButton
+        bot.add_dynamic_items(SignupButton)  # custom_id carries the event id
         from src.services.scheduler import RefreshScheduler
         RefreshScheduler(bot).start()
         if config.GUILD_ID:

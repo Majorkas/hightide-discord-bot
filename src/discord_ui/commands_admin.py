@@ -56,6 +56,10 @@ def _chunk_embeds(embeds: list[discord.Embed]) -> list[list[discord.Embed]]:
     return chunks
 
 
+def _md_title(title: str) -> str:
+    return discord.utils.escape_markdown(discord.utils.escape_mentions(title))
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -337,6 +341,44 @@ class AdminCog(commands.Cog):
                 f"Refresh failed: {type(e).__name__}",
                 ephemeral=True
             )
+
+    async def signups_event_autocomplete(self, interaction: discord.Interaction,
+                                         current: str) -> list[app_commands.Choice[str]]:
+        from src.db.repositories import get_active_events
+        needle = current.strip().lower()
+        with _session() as session:
+            events = get_active_events(session, interaction.guild_id)
+            matches = [(e.title, e.id) for e in events if needle in e.title.lower()]
+        return [app_commands.Choice(name=title[:100], value=str(event_id))
+                for title, event_id in matches[:25]]
+
+    @board_group.command(name="signups", description="List who signed up for an event")
+    @app_commands.autocomplete(event=signups_event_autocomplete)
+    async def board_signups(self, interaction: discord.Interaction, event: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        from src.db.repositories import get_event_by_id
+        from src.services.signup_service import list_signups
+        with _session() as session:
+            row = get_event_by_id(session, interaction.guild_id, int(event)) \
+                if event.isdigit() else None
+            if row is None:
+                await interaction.followup.send("Event not found.", ephemeral=True)
+                return
+            title = row.title
+            user_ids = [s.user_id for s in list_signups(session, interaction.guild_id, row.id)]
+        if not user_ids:
+            await interaction.followup.send("No signups yet.", ephemeral=True)
+            return
+        names = []
+        for uid in user_ids:
+            member = interaction.guild.get_member(uid)
+            names.append(discord.utils.escape_markdown(
+                discord.utils.escape_mentions(member.display_name)) if member else f"User {uid}")
+        text = f"**{_md_title(title)}** — {len(names)} going\n" + "\n".join(f"• {n}" for n in names)
+        if len(text) > _MAX_MESSAGE_CHARS:
+            text = text[:_MAX_MESSAGE_CHARS - 1] + "…"
+        await interaction.followup.send(
+            text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     @board_group.command(name="recreate")
     @app_commands.choices(board_type=[

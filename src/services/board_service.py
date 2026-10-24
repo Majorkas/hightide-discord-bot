@@ -12,6 +12,8 @@ from src.db.repositories import (
     get_active_events, get_board_post, get_or_create_config, save_board_post,
 )
 from src.discord_ui.embeds import build_board_embed, build_week_board_items
+from src.discord_ui.role_views import SignupView
+from src.services.signup_service import count_signups
 from src.services.weekly_service import get_weekly_rows, seed_weekly_recurring
 
 log = logging.getLogger("hightide.board")
@@ -226,9 +228,9 @@ async def _delete_stored_messages(bot, channel, message_ids: list[int]) -> None:
             log.exception("could not delete board message %s", message_id)
 
 
-def _card_hash(e: Event, tz) -> str:
+def _card_hash(e: Event, tz, signup_count: int = 0) -> str:
     parts = [str(tz), e.title, str(e.starts_at), str(e.price_text), str(e.time_known),
-             str(e.url), str(e.summary), str(e.image_url)]
+             str(e.url), str(e.summary), str(e.image_url), str(signup_count)]
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -304,10 +306,17 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
                                    weekly_image_url=cfg.weekly_image_url)
     by_id = {e.external_id: e for e in events}
     keys = [k for k, _ in items]
-    hashes = {k: _card_hash(by_id[k], tz) if k in by_id
+    counts = {k: count_signups(session, by_id[k].id) for k in keys if k in by_id}
+    hashes = {k: _card_hash(by_id[k], tz, counts[k]) if k in by_id
               else _weekly_hash(embed) if k == "weekly" else _embed_hash(embed)
               for k, embed in items}
     no_mentions = discord.AllowedMentions.none()
+
+    def _card_kwargs(key: str, embed) -> dict:
+        kwargs = {"embed": embed, "allowed_mentions": no_mentions}
+        if key in by_id:
+            kwargs["view"] = SignupView(by_id[key].id, counts[key])
+        return kwargs
 
     stored: dict[str, tuple[int, str | None]] = {}
     extras: list[int] = []
@@ -358,13 +367,13 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
                 if old is not None:
                     try:
                         card_msg = await channel.fetch_message(old[0])
-                        await card_msg.edit(embed=embed, allowed_mentions=no_mentions)
+                        await card_msg.edit(**_card_kwargs(key, embed))
                         new_ids[key] = old[0]
                         changed = True
                         continue
                     except discord.NotFound:
                         log.info("board message for %s missing, resending", key)
-                msg = await channel.send(embed=embed, allowed_mentions=no_mentions)
+                msg = await channel.send(**_card_kwargs(key, embed))
                 sent.append(msg)
                 new_ids[key] = msg.id
                 changed = True

@@ -35,3 +35,33 @@ class RolesPanelView(discord.ui.View):
             from src.services.role_service import handle_role_toggle
             await handle_role_toggle(interaction, role_row_id)
         return _cb
+
+
+class SignupButton(discord.ui.DynamicItem[discord.ui.Button],
+                   template=r"signup:(?P<event_id>[0-9]+)"):
+    """Going button; the event id lives in the custom_id so it survives restarts."""
+
+    def __init__(self, event_id: int, count: int = 0):
+        self.event_id = event_id
+        super().__init__(discord.ui.Button(
+            label=f"✅ Going ({count})", style=discord.ButtonStyle.success,
+            custom_id=f"signup:{event_id}"))
+
+    @property
+    def label(self) -> str | None:
+        return self.item.label
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Item,
+                             match) -> "SignupButton":
+        return cls(int(match["event_id"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        from src.services.signup_service import handle_signup_toggle
+        await handle_signup_toggle(interaction, self.event_id)
+
+
+class SignupView(discord.ui.View):
+    def __init__(self, event_id: int, count: int = 0):
+        super().__init__(timeout=None)
+        self.add_item(SignupButton(event_id, count))

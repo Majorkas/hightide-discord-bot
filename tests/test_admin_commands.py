@@ -69,7 +69,7 @@ def test_command_surface():
         "weekly_list", "weekly_add", "weekly_remove", "weekly_image",
     }
     assert {c.name for c in groups["source"].commands} == {"list", "add", "remove"}
-    assert {c.name for c in groups["board"].commands} == {"preview", "refresh", "recreate"}
+    assert {c.name for c in groups["board"].commands} == {"preview", "refresh", "recreate", "signups"}
     assert {c.name for c in groups["roles"].commands} == {
         "setup", "add", "remove", "keyword", "list"}
     for name in ("config", "source", "board", "roles"):

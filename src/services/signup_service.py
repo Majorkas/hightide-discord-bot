@@ -1,9 +1,22 @@
 """Signup service for event signups."""
+import discord
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from src import config
 from src.db.models import EventSignup
+from src.db.repositories import get_event_by_id
+from src.db.session import get_session_factory
+
+_session_factory = None
+
+
+def _session() -> Session:
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = get_session_factory(config.DATABASE_URL)
+    return _session_factory()
 
 
 def toggle_signup(session: Session, guild_id: int, event_id: int, user_id: int) -> tuple[bool, int]:
@@ -64,3 +77,16 @@ def list_signups(session: Session, guild_id: int, event_id: int) -> list[EventSi
         EventSignup.event_id == event_id
     )
     return list(session.execute(stmt).scalars())
+
+
+async def handle_signup_toggle(interaction: discord.Interaction, event_id: int) -> None:
+    from src.discord_ui.role_views import SignupView
+    with _session() as session:
+        event = get_event_by_id(session, interaction.guild_id, event_id)
+        if event is None or not event.is_active:
+            await interaction.response.send_message("This event has ended.", ephemeral=True)
+            return
+        added, count = toggle_signup(session, interaction.guild_id, event_id, interaction.user.id)
+    await interaction.response.edit_message(view=SignupView(event_id, count))
+    await interaction.followup.send(
+        "You're on the list!" if added else "Removed you from the list.", ephemeral=True)
