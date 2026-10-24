@@ -49,5 +49,23 @@ def ensure_guild_config_weekly_seeded(engine) -> None:
     log.info("added guild_config.weekly_seeded column")
 
 
+def ensure_guild_config_v2_columns(engine) -> None:
+    """Add guild_config.roles_channel_id, .roles_message_id, .announce_channel_id to pre-existing DBs."""
+    columns = [
+        ("roles_channel_id", "BIGINT"),
+        ("roles_message_id", "BIGINT"),
+        ("announce_channel_id", "BIGINT"),
+    ]
+    for col_name, col_type in columns:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE guild_config ADD COLUMN {col_name} {col_type}"))
+        except OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+            continue
+        log.info(f"added guild_config.{col_name} column")
+
+
 def get_session_factory(url: str) -> sessionmaker:
     return sessionmaker(bind=get_engine(url), expire_on_commit=False, future=True)

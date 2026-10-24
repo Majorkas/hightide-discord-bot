@@ -10,7 +10,7 @@ from discord.ext import commands  # noqa: E402
 from src import config  # noqa: E402
 from src.db.models import Base  # noqa: E402
 from src.db.session import (  # noqa: E402
-    ensure_board_post_message_ids, ensure_guild_config_weekly_image_url,
+    ensure_board_post_message_ids, ensure_guild_config_v2_columns, ensure_guild_config_weekly_image_url,
     ensure_guild_config_weekly_seeded, get_engine,
 )
 
@@ -43,6 +43,7 @@ def create_bot() -> commands.Bot:
         ensure_board_post_message_ids(engine)
         ensure_guild_config_weekly_image_url(engine)
         ensure_guild_config_weekly_seeded(engine)
+        ensure_guild_config_v2_columns(engine)
         from src.services.scheduler import RefreshScheduler
         RefreshScheduler(bot).start()
         if config.GUILD_ID:

@@ -48,6 +48,9 @@ class GuildConfig(Base):
     delete_previous_month_message: Mapped[bool] = mapped_column(Boolean, default=True)
     weekly_image_url: Mapped[str | None] = mapped_column(String, nullable=True)
     weekly_seeded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    roles_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    roles_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    announce_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class WeeklyRecurring(Base):
@@ -109,3 +112,36 @@ class BoardPost(Base):
     message_ids: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
     render_hash: Mapped[str] = mapped_column(String, default="")
     updated_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+
+
+class InterestRole(Base):
+    __tablename__ = "interest_roles"
+    __table_args__ = (UniqueConstraint("guild_id", "role_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    role_id: Mapped[int] = mapped_column(BigInteger)
+    label: Mapped[str] = mapped_column(String)
+    emoji: Mapped[str | None] = mapped_column(String, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class RoleKeyword(Base):
+    __tablename__ = "role_keywords"
+    __table_args__ = (UniqueConstraint("interest_role_id", "keyword"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    interest_role_id: Mapped[int] = mapped_column(Integer)
+    keyword: Mapped[str] = mapped_column(String)
+
+
+class EventRolePing(Base):
+    __tablename__ = "event_role_pings"
+    __table_args__ = (UniqueConstraint("event_id", "interest_role_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    event_id: Mapped[int] = mapped_column(Integer)
+    interest_role_id: Mapped[int] = mapped_column(Integer)
+    pinged_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)

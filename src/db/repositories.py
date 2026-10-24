@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.db.models import BoardPost, Event, EventSource, GuildConfig
+from src.db.models import BoardPost, Event, EventRolePing, EventSource, GuildConfig, InterestRole, RoleKeyword
 
 
 def get_or_create_config(session: Session, guild_id: int) -> GuildConfig:
@@ -80,3 +80,74 @@ def save_board_post(session, guild_id, board_type, period_key, channel_id,
     post.updated_at = datetime.now(timezone.utc)
     session.commit()
     return post
+
+
+def add_interest_role(session: Session, guild_id: int, role_id: int, label: str, emoji: str | None = None) -> InterestRole:
+    row = InterestRole(guild_id=guild_id, role_id=role_id, label=label, emoji=emoji)
+    existing = list_interest_roles(session, guild_id)
+    row.sort_order = (max((x.sort_order for x in existing), default=-1) + 1)
+    session.add(row)
+    session.commit()
+    return row
+
+
+def remove_interest_role(session: Session, guild_id: int, row_id: int) -> bool:
+    row = session.get(InterestRole, row_id)
+    if row is None or row.guild_id != guild_id:
+        return False
+    session.query(RoleKeyword).filter(RoleKeyword.interest_role_id == row.id).delete()
+    session.query(EventRolePing).filter(EventRolePing.interest_role_id == row.id).delete()
+    session.delete(row)
+    session.commit()
+    return True
+
+
+def list_interest_roles(session: Session, guild_id: int) -> list[InterestRole]:
+    stmt = select(InterestRole).where(InterestRole.guild_id == guild_id).order_by(InterestRole.sort_order)
+    return list(session.execute(stmt).scalars())
+
+
+def add_keyword(session: Session, interest_role_id: int, keyword: str) -> RoleKeyword:
+    row = RoleKeyword(interest_role_id=interest_role_id, keyword=keyword.strip().lower())
+    session.add(row)
+    session.commit()
+    return row
+
+
+def remove_keyword(session: Session, interest_role_id: int, keyword: str) -> bool:
+    stmt = select(RoleKeyword).where(
+        RoleKeyword.interest_role_id == interest_role_id,
+        RoleKeyword.keyword == keyword.strip().lower())
+    row = session.execute(stmt).scalar_one_or_none()
+    if row is None:
+        return False
+    session.delete(row)
+    session.commit()
+    return True
+
+
+def get_keywords_by_role(session: Session, guild_id: int) -> dict[int, list[str]]:
+    roles = list_interest_roles(session, guild_id)
+    out: dict[int, list[str]] = {r.id: [] for r in roles}
+    if not roles:
+        return out
+    stmt = select(RoleKeyword).where(
+        RoleKeyword.interest_role_id.in_([r.id for r in roles])).order_by(RoleKeyword.id)
+    for k in session.execute(stmt).scalars():
+        out[k.interest_role_id].append(k.keyword)
+    return out
+
+
+def has_ping(session: Session, event_id: int, interest_role_id: int) -> bool:
+    stmt = select(EventRolePing).where(
+        EventRolePing.event_id == event_id,
+        EventRolePing.interest_role_id == interest_role_id)
+    return session.execute(stmt).scalar_one_or_none() is not None
+
+
+def record_ping(session: Session, guild_id: int, event_id: int, interest_role_id: int) -> None:
+    if has_ping(session, event_id, interest_role_id):
+        return
+    session.add(EventRolePing(guild_id=guild_id, event_id=event_id,
+                              interest_role_id=interest_role_id))
+    session.commit()
