@@ -30,6 +30,8 @@ _SEED_PREFIX = "seeded:"
 _LEGACY_SEED_MARKER = "seeded"
 _MAX_MINOR_UNIT = 4
 _MAX_AFFIX_CHARS = 8
+MAX_ALERTS_PER_RUN = 10
+_MAX_IMAGE_URL_CHARS = 2000
 
 
 def parse_category_slugs(raw: str) -> list[str]:
@@ -52,15 +54,21 @@ def parse_category_slugs(raw: str) -> list[str]:
 
 def _to_alert(product: dict) -> dict | None:
     try:
+        pid, link = product["id"], product["link"]
+        if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(link, str):
+            raise TypeError("bad id/link type")
         price = extract_price(product.get("content", {}).get("rendered", ""))
+        image = _image_url(product)
+        if not isinstance(image, str) or len(image) > _MAX_IMAGE_URL_CHARS:
+            image = None
         return {
-            "external_id": f"wp:{product['id']}",
+            "external_id": f"wp:{pid}",
             "title": clean_title(product["title"]["rendered"])[:MAX_TITLE_CHARS],
-            "url": product["link"][:MAX_URL_CHARS],
+            "url": link[:MAX_URL_CHARS],
             "price": price[:MAX_PRICE_CHARS] if price else None,
-            "image_url": _image_url(product),
+            "image_url": image,
         }
-    except (KeyError, TypeError, AttributeError):
+    except (KeyError, TypeError, AttributeError, ValueError):
         log.warning("skipping malformed product id=%s",
                     product.get("id") if isinstance(product, dict) else None)
         return None
@@ -131,7 +139,7 @@ def check_new_products(session: Session, guild_id: int, base_url: str, tz) -> li
     for slug in slugs:
         try:
             products = fetch_category_products(base_url, slug)
-        except (FetchError, httpx.HTTPError) as e:
+        except (FetchError, httpx.HTTPError, ValueError, KeyError, TypeError) as e:
             log.warning("watched category %s fetch failed: %s", slug, e)
             if slug not in seeded:
                 unseeded_failures.append(slug)
@@ -192,13 +200,26 @@ async def post_product_alerts(bot, session: Session, guild_id: int, products: li
     if channel is None:
         return 0
     sent = 0
-    for product in products:
+    for product in products[:MAX_ALERTS_PER_RUN]:
         try:
             await channel.send(embed=_alert_embed(product),
                                allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
-            log.exception("product alert failed for %s", product["external_id"])
+            log.exception("product alert failed for %s", product.get("external_id"))
+            continue
+        except Exception:
+            # Poison pill: record it so a permanently failing product can't block the feed.
+            log.exception("product alert unsendable for %s", product.get("external_id"))
+            record_product_alerts(session, guild_id, [product["external_id"]])
             continue
         record_product_alerts(session, guild_id, [product["external_id"]])
         sent += 1
+    overflow = len(products) - MAX_ALERTS_PER_RUN
+    if overflow > 0:
+        # Overflow stays unrecorded so later ticks drain it.
+        try:
+            await channel.send(f"➕ {overflow} more new products — check the shop.",
+                               allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            log.exception("product overflow digest failed")
     return sent
