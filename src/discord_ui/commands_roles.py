@@ -1,9 +1,12 @@
+import json
+import logging
 import re
 from typing import Literal
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+import httpx
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -20,10 +23,13 @@ from src.discord_ui.role_views import (
 )
 from src.services.deck_service import build_card_embed, scryfall_card
 
+log = logging.getLogger("hightide")
+
 _MAX_LABEL_LEN = 60
 _MAX_EMOJI_LEN = 64
 _MAX_KEYWORD_LEN = 100
 _MAX_MESSAGE_CHARS = 1900
+_MAX_CARD_NAME_LEN = 100
 _PANEL_GONE_NOTE = " The panel message is gone — run /roles setup to post it again."
 _PANEL_FORBIDDEN_NOTE = (" I couldn't update the panel (missing permission to view or edit "
                          "it) — check my channel permissions.")
@@ -342,20 +348,47 @@ class RolesCog(commands.Cog):
     @app_commands.guild_only()
     async def card_lookup(self, interaction: discord.Interaction, name: str) -> None:
         """Look up a Magic card by name and display its details."""
+        # Name length guard
+        if len(name) > _MAX_CARD_NAME_LEN:
+            await interaction.response.send_message(
+                f"Card name must be ≤{_MAX_CARD_NAME_LEN} characters.",
+                ephemeral=True
+            )
+            return
+
+        # Lookup with bounded timeout (2.5s) and retries disabled
         try:
-            card = await scryfall_card(name)
-            if card is None:
-                # Card not found - check for suggestion in error response
-                await interaction.response.send_message(
-                    f"No card found for '{_md_escape(name)}'.",
-                    ephemeral=True
-                )
-                return
-            
-            embed = build_card_embed(card)
-            await interaction.response.send_message(embed=embed, ephemeral=False)
-        except Exception as e:
+            card = await scryfall_card(name, retries=False, timeout=2.5)
+        except httpx.TransportError as e:
+            log.warning(f"Scryfall lookup transport error for '{name}': {e}")
             await interaction.response.send_message(
                 "Scryfall is having trouble — try again shortly.",
                 ephemeral=True
             )
+            return
+        except httpx.HTTPStatusError as e:
+            log.warning(f"Scryfall lookup HTTP error for '{name}': {e}")
+            await interaction.response.send_message(
+                "Scryfall is having trouble — try again shortly.",
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            log.error(f"Unexpected error in /card for '{name}': {e}")
+            await interaction.response.send_message(
+                "Scryfall is having trouble — try again shortly.",
+                ephemeral=True
+            )
+            return
+
+        # Handle 404 (card not found)
+        if card is None:
+            await interaction.response.send_message(
+                f"No card found for '{_md_escape(name)}'.",
+                ephemeral=True
+            )
+            return
+
+        # Success: build and send embed (public)
+        embed = build_card_embed(card)
+        await interaction.response.send_message(embed=embed, ephemeral=False)

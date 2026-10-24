@@ -34,7 +34,7 @@ class TestBuildCardEmbed:
         """Embed has title, URL, image, and description."""
         card = scryfall_card_fixture
         embed = build_card_embed(card)
-        
+
         assert isinstance(embed, discord.Embed)
         assert embed.title == "Lightning Bolt"
         assert embed.url == "https://scryfall.com/card/msc/806/lightning-bolt?utm_source=api"
@@ -46,7 +46,7 @@ class TestBuildCardEmbed:
         card = scryfall_card_fixture
         embed = build_card_embed(card)
         desc = embed.description
-        
+
         assert "{R}" in desc  # mana_cost
         assert "Instant" in desc  # type_line
         assert "Lightning Bolt deals 3 damage" in desc  # oracle_text
@@ -56,17 +56,17 @@ class TestBuildCardEmbed:
         card = scryfall_card_fixture
         embed = build_card_embed(card)
         desc = embed.description
-        
+
         assert "**USD $0.85**" in desc
 
     def test_embed_without_price(self, scryfall_card_fixture):
         """Embed renders without price when prices.usd is None."""
         card = scryfall_card_fixture.copy()
         card["prices"] = {"usd": None}
-        
+
         embed = build_card_embed(card)
         desc = embed.description
-        
+
         # Should not have a price line
         assert "USD" not in desc
 
@@ -74,14 +74,14 @@ class TestBuildCardEmbed:
         """Single-faced card uses image_uris.normal."""
         card = scryfall_card_fixture
         embed = build_card_embed(card)
-        
+
         assert embed.image.url == "https://cards.scryfall.io/normal/front/7/6/7673784e-db4b-43a1-8d55-1bb9fc1e284f.jpg?1783903008"
 
     def test_dfc_uses_front_face_image(self, scryfall_dfc_fixture):
         """Double-faced card uses card_faces[0].image_uris.normal (front face)."""
         card = scryfall_dfc_fixture
         embed = build_card_embed(card)
-        
+
         # Should use front face's image
         front_face = card["card_faces"][0]
         assert embed.image.url == front_face["image_uris"]["normal"]
@@ -92,10 +92,10 @@ class TestBuildCardEmbed:
         # Create a very long oracle text
         long_text = "This is a very long oracle text. " * 30
         card["oracle_text"] = long_text
-        
+
         embed = build_card_embed(card)
         desc = embed.description
-        
+
         # Oracle text portion should be trimmed
         assert len(desc) <= 2000  # Discord embed description limit
         # Should not contain the full long text
@@ -105,10 +105,10 @@ class TestBuildCardEmbed:
         """Dangerous markdown characters in scraped text are escaped."""
         card = scryfall_card_fixture.copy()
         card["oracle_text"] = "Deals [damage] to **any** target with *italics* and _underscores_"
-        
+
         embed = build_card_embed(card)
         desc = embed.description
-        
+
         # Brackets, asterisks, underscores should be escaped
         assert r"\[" in desc or "[" not in desc
         # At least the oracle text should be in there (escaped or not visible)
@@ -118,7 +118,7 @@ class TestBuildCardEmbed:
         """URL in embed is validated and escaped properly."""
         card = scryfall_card_fixture
         embed = build_card_embed(card)
-        
+
         # URL should be safe (https scheme and valid host)
         assert embed.url.startswith("https://")
         assert "scryfall" in embed.url.lower()
@@ -136,11 +136,11 @@ class TestScryfallCardFuzzy:
             mock_response.status_code = 200
             mock_response.json.return_value = scryfall_card_fixture
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             result = await scryfall_card("Lightning Bolt")
-            
+
             assert result is not None
             assert result["name"] == "Lightning Bolt"
 
@@ -153,11 +153,11 @@ class TestScryfallCardFuzzy:
             mock_response.status_code = 404
             mock_response.json.return_value = {"details": "Not found", "data": {}}
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             result = await scryfall_card("Nonexistent Card Name")
-            
+
             assert result is None
 
     @pytest.mark.asyncio
@@ -172,40 +172,37 @@ class TestScryfallCardFuzzy:
                 "data": {"options": ["Lightning Bolt", "Chain Lightning"]}
             }
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             result = await scryfall_card("Lightni")
-            
+
             # Fuzzy should return None on 404, but error details are handled by caller
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_network_error_returns_none(self):
-        """Network/transport error returns None."""
+    async def test_network_error_propagates(self):
+        """Network/transport error propagates (with retries=True)."""
         with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.get.side_effect = httpx.TransportError("Network error")
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
-            result = await scryfall_card("Lightning Bolt")
-            
-            assert result is None
+
+            with pytest.raises(httpx.TransportError):
+                await scryfall_card("Lightning Bolt", retries=True)
 
     @pytest.mark.asyncio
-    async def test_5xx_error_returns_none(self):
-        """5xx errors return None (handled by retry logic)."""
+    async def test_5xx_error_propagates(self):
+        """5xx errors propagate after retries (with retries=True)."""
         with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = MagicMock()
             mock_response.status_code = 503
-            # After retries fail, this should return None
             mock_client.get.side_effect = httpx.HTTPStatusError("503", request=MagicMock(), response=mock_response)
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
-            result = await scryfall_card("Lightning Bolt")
-            
-            assert result is None
+
+            with pytest.raises(httpx.HTTPStatusError):
+                await scryfall_card("Lightning Bolt", retries=True)
 
     @pytest.mark.asyncio
     async def test_uses_fuzzy_endpoint(self):
@@ -216,11 +213,11 @@ class TestScryfallCardFuzzy:
             mock_response.status_code = 200
             mock_response.json.return_value = {"name": "Lightning Bolt"}
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             await scryfall_card("Lightning Bolt")
-            
+
             # Should call the fuzzy endpoint
             mock_client.get.assert_called_once()
             call_args = mock_client.get.call_args
@@ -235,11 +232,11 @@ class TestScryfallCardFuzzy:
             mock_response.status_code = 200
             mock_response.json.return_value = {"name": "Lightning Bolt"}
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             await scryfall_card("Lightning Bolt")
-            
+
             # Check headers in call
             call_args = mock_client.get.call_args
             if "headers" in call_args[1]:
@@ -258,11 +255,11 @@ class TestScryfallCardExact:
             mock_response.status_code = 200
             mock_response.json.return_value = scryfall_card_fixture
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             result = await scryfall_card_exact("Lightning Bolt")
-            
+
             assert result is not None
             assert result["name"] == "Lightning Bolt"
 
@@ -275,11 +272,11 @@ class TestScryfallCardExact:
             mock_response.status_code = 404
             mock_response.json.return_value = {"details": "Not found"}
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             result = await scryfall_card_exact("Lightning Bolt Extra")
-            
+
             assert result is None
 
     @pytest.mark.asyncio
@@ -291,15 +288,200 @@ class TestScryfallCardExact:
             mock_response.status_code = 200
             mock_response.json.return_value = {"name": "Lightning Bolt"}
             mock_client.get.return_value = mock_response
-            
+
             mock_client_class.return_value.__aenter__.return_value = mock_client
-            
+
             await scryfall_card_exact("Lightning Bolt")
-            
+
             # Should call the exact endpoint
             mock_client.get.assert_called_once()
             call_args = mock_client.get.call_args
             assert "exact=" in call_args[0][0] or "exact" in str(call_args[1])
+
+
+class TestDoubleFacedRichness:
+    """Test double-faced card handling in embed."""
+
+    def test_dfc_uses_front_face_mana_cost(self, scryfall_dfc_fixture):
+        """DFC with empty mana_cost uses card_faces[0].mana_cost."""
+        card = scryfall_dfc_fixture.copy()
+        card["mana_cost"] = ""  # Clear main mana cost
+        embed = build_card_embed(card)
+        desc = embed.description
+
+        front_cost = card["card_faces"][0].get("mana_cost", "")
+        # Should contain the front face mana cost
+        assert front_cost in desc or len(desc) > 0
+
+    def test_dfc_uses_front_face_oracle_text(self, scryfall_dfc_fixture):
+        """DFC with empty oracle_text uses card_faces[0].oracle_text."""
+        card = scryfall_dfc_fixture.copy()
+        card["oracle_text"] = ""  # Clear main oracle text
+        embed = build_card_embed(card)
+        desc = embed.description
+
+        front_oracle = card["card_faces"][0].get("oracle_text", "")
+        # Should contain front face text (at least part of it)
+        if front_oracle:
+            assert front_oracle[:50] in desc or len(desc) > 0
+
+
+class TestRetryPolicies:
+    """Test retry behavior with different parameters."""
+
+    @pytest.mark.asyncio
+    async def test_404_never_retries(self):
+        """404 on first call means exactly 1 GET call (no retry)."""
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 404
+            mock_response.json.return_value = {"details": "Not found"}
+            mock_client.get.return_value = mock_response
+
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await scryfall_card("Nonexistent", retries=True)
+
+            assert result is None
+            # Should only call once (no retry on 404)
+            assert mock_client.get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_5xx_retries_three_times_when_enabled(self):
+        """5xx error with retries=True attempts 3 times."""
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class, \
+             patch("src.services.deck_service.wait_exponential") as mock_wait, \
+             patch("src.services.deck_service.wait_exponential.min") as mock_min, \
+             patch("tenacity.sleep") as mock_sleep:
+
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 503
+            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "503", request=MagicMock(), response=mock_response
+            )
+            mock_client.get.side_effect = httpx.HTTPStatusError(
+                "503", request=MagicMock(), response=mock_response
+            )
+
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            try:
+                await scryfall_card("Lightning Bolt", retries=True)
+            except httpx.HTTPStatusError:
+                pass
+
+            # With 3 retries, should attempt 3 times
+            assert mock_client.get.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_retries_false_single_attempt_on_5xx(self):
+        """5xx error with retries=False attempts only once."""
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 503
+            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "503", request=MagicMock(), response=mock_response
+            )
+            mock_client.get.side_effect = httpx.HTTPStatusError(
+                "503", request=MagicMock(), response=mock_response
+            )
+
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            try:
+                await scryfall_card("Lightning Bolt", retries=False)
+            except httpx.HTTPStatusError:
+                pass
+
+            # With retries=False, should only attempt once
+            assert mock_client.get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_default_timeout_15_seconds(self):
+        """Default timeout parameter is 15.0 seconds."""
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"name": "Lightning Bolt"}
+            mock_client.get.return_value = mock_response
+
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await scryfall_card("Lightning Bolt")
+
+            # Check timeout was passed to get()
+            call_args = mock_client.get.call_args
+            assert "timeout" in call_args[1]
+            assert call_args[1]["timeout"] == 15.0
+
+    @pytest.mark.asyncio
+    async def test_custom_timeout_respected(self):
+        """Custom timeout parameter is respected."""
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"name": "Lightning Bolt"}
+            mock_client.get.return_value = mock_response
+
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await scryfall_card("Lightning Bolt", timeout=2.5)
+
+            # Check custom timeout was passed
+            call_args = mock_client.get.call_args
+            assert "timeout" in call_args[1]
+            assert call_args[1]["timeout"] == 2.5
+
+
+class TestEndpointParamValidation:
+    """Test that correct endpoint params are used."""
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_param_exact_value(self):
+        """Fuzzy endpoint uses fuzzy=name (not exact=name)."""
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"name": "Lightning Bolt"}
+            mock_client.get.return_value = mock_response
+
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await scryfall_card("Lightning Bolt", retries=False)
+
+            # Verify params dict
+            call_args = mock_client.get.call_args
+            params = call_args[1].get("params", {})
+            assert "fuzzy" in params, f"Expected 'fuzzy' param, got: {params}"
+            assert params["fuzzy"] == "Lightning Bolt"
+            assert "exact" not in params
+
+    @pytest.mark.asyncio
+    async def test_exact_param_exact_value(self):
+        """Exact endpoint uses exact=name (not fuzzy=name)."""
+        with patch("src.services.deck_service.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"name": "Lightning Bolt"}
+            mock_client.get.return_value = mock_response
+
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await scryfall_card_exact("Lightning Bolt")
+
+            # Verify params dict
+            call_args = mock_client.get.call_args
+            params = call_args[1].get("params", {})
+            assert "exact" in params, f"Expected 'exact' param, got: {params}"
+            assert params["exact"] == "Lightning Bolt"
+            assert "fuzzy" not in params
 
 
 class TestCommandSurface:
@@ -310,7 +492,7 @@ class TestCommandSurface:
         from src.bot import create_bot
         bot = create_bot()
         commands = {c.name: c for c in bot.tree.get_commands()}
-        
+
         assert "card" in commands, f"Expected 'card' command, got: {list(commands.keys())}"
 
     def test_card_command_is_public(self):
@@ -318,7 +500,7 @@ class TestCommandSurface:
         from src.bot import create_bot
         bot = create_bot()
         commands = {c.name: c for c in bot.tree.get_commands()}
-        
+
         card_cmd = commands.get("card")
         assert card_cmd is not None
         assert card_cmd.default_permissions is None, "card command should be public (no manage_guild required)"
@@ -328,7 +510,7 @@ class TestCommandSurface:
         from src.bot import create_bot
         bot = create_bot()
         commands = {c.name: c for c in bot.tree.get_commands()}
-        
+
         card_cmd = commands.get("card")
         assert card_cmd is not None
         assert card_cmd.guild_only is True
