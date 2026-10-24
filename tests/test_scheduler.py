@@ -114,6 +114,49 @@ async def test_run_daily_refresh_one_board_failure_isolated(temp_db, monkeypatch
     assert mock_upsert.await_count == 2
 
 
+async def test_run_daily_refresh_wants_channel_unset_skips_call(temp_db, monkeypatch):
+    _seed(temp_db, wants_channel_id=None)
+    monkeypatch.setattr("src.services.scheduler.refresh_events",
+                        MagicMock(return_value={"added": 0}))
+    monkeypatch.setattr("src.services.scheduler.upsert_board", AsyncMock(side_effect=["created", "created"]))
+    mock_wants = AsyncMock()
+    monkeypatch.setattr("src.services.scheduler.update_wants_board", mock_wants)
+
+    result = await scheduler.run_daily_refresh(MagicMock(), 999)
+
+    mock_wants.assert_not_awaited()
+    assert "wants" not in result
+
+
+async def test_run_daily_refresh_wants_channel_set_calls_update(temp_db, monkeypatch):
+    _seed(temp_db, wants_channel_id=333)
+    monkeypatch.setattr("src.services.scheduler.refresh_events",
+                        MagicMock(return_value={"added": 0}))
+    monkeypatch.setattr("src.services.scheduler.upsert_board", AsyncMock(side_effect=["created", "created"]))
+    mock_wants = AsyncMock(return_value="edited")
+    monkeypatch.setattr("src.services.scheduler.update_wants_board", mock_wants)
+
+    result = await scheduler.run_daily_refresh(MagicMock(), 999)
+
+    mock_wants.assert_awaited_once()
+    assert result["wants"] == "edited"
+
+
+async def test_run_daily_refresh_wants_failure_isolated(temp_db, monkeypatch):
+    _seed(temp_db, wants_channel_id=333)
+    monkeypatch.setattr("src.services.scheduler.refresh_events",
+                        MagicMock(return_value={"added": 0}))
+    monkeypatch.setattr("src.services.scheduler.upsert_board", AsyncMock(side_effect=["created", "created"]))
+    mock_wants = AsyncMock(side_effect=ConnectionError("net fail"))
+    monkeypatch.setattr("src.services.scheduler.update_wants_board", mock_wants)
+
+    result = await scheduler.run_daily_refresh(MagicMock(), 999)
+
+    assert result["wants"] == "error:ConnectionError"
+    assert result["this_week"] == "created"
+    assert result["this_month"] == "created"
+
+
 # --- tick ---
 
 _BOARD_FAIL = {"events": {"added": 1}, "this_week": "error:RuntimeError", "this_month": "created"}
@@ -372,6 +415,32 @@ async def test_tick_full_success_sets_last_run_key(temp_db, monkeypatch, clock):
 
     # All values are non-error, so _last_run_key should be set
     assert inst._last_run_key[999] == "2026-10-23"
+
+
+async def test_tick_wants_error_does_not_drive_backoff(temp_db, monkeypatch, clock):
+    """
+    When update_wants_board fails (wants="error:..."), _last_run_key SHOULD still be set
+    because wants errors are excluded from has_error scan (like pings and tonight).
+    """
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00", wants_channel_id=333)
+    # Boards succeed, but wants fails
+    success_with_wants_error = {
+        "events": {"added": 2},
+        "this_week": "created",
+        "this_month": "created",
+        "wants": "error:ConnectionError",
+    }
+    mock_refresh = AsyncMock(return_value=success_with_wants_error)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", mock_refresh)
+
+    inst = RefreshScheduler(_bot())
+    await inst.tick.coro(inst)
+
+    # Wants error should not drive backoff; _last_run_key should be set
+    assert inst._last_run_key[999] == "2026-10-23"
+    # No retry scheduled since this is considered a success
+    assert inst._next_attempt.get(999) is None
 
 
 # --- fetch-once-per-day + bounded backoff ---

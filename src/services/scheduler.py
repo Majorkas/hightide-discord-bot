@@ -15,6 +15,7 @@ from src.discord_ui.embeds import build_tonight_embed
 from src.services.board_service import upsert_board
 from src.services.event_service import refresh_events
 from src.services.role_service import _resolve_channel, ping_new_events
+from src.services.want_service import update_wants_board
 
 log = logging.getLogger("hightide.scheduler")
 
@@ -103,6 +104,13 @@ async def _run_daily_refresh_locked(bot, guild_id: int, *, fetch: bool) -> dict:
                 log.exception("board upsert failed for %s", board_type)
                 session.rollback()
                 result[board_type] = f"error:{type(e).__name__}"
+        if cfg.wants_channel_id:
+            try:
+                result["wants"] = await update_wants_board(bot, session, guild_id)
+            except Exception as e:
+                log.exception("wants board update failed")
+                session.rollback()
+                result["wants"] = f"error:{type(e).__name__}"
         log.info("daily refresh: %s", result)
         return result
 
@@ -178,7 +186,7 @@ class RefreshScheduler:
             result = await run_daily_refresh(self.bot, cfg.guild_id, fetch=fetch)
             has_error = any(
                 isinstance(v, str) and v.startswith("error:")
-                for k, v in result.items() if k != "pings"
+                for k, v in result.items() if k not in ("pings", "wants", "tonight")
             )
             if isinstance(result.get("events"), dict):
                 self._events_done_key[guild_id] = today
