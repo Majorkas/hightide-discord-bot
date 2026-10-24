@@ -59,6 +59,7 @@ def ensure_guild_config_v2_columns(engine) -> None:
         ("last_daily_post_date", "VARCHAR"),
         ("wants_channel_id", "BIGINT"),
         ("new_stock_channel_id", "BIGINT"),
+        ("preorder_channel_id", "BIGINT"),
     ]
     for col_name, col_type in columns:
         try:

@@ -195,6 +195,20 @@ def build_event_card(e: Event, tz) -> discord.Embed:
     return card
 
 
+def build_preorder_card(product: dict) -> discord.Embed:
+    """Full image card for one preorder product (a dict with title/url/price/image_url)."""
+    desc = "Pre-order"
+    if product.get("price"):
+        desc += f" · {_md_escape(product['price'])}"
+    card = discord.Embed(title=_md_escape(product["title"][:MAX_TITLE_CHARS]),
+                         url=_safe_url(product.get("url")),
+                         description=desc, color=_COLOR)
+    image = _safe_url(product.get("image_url"))
+    if image:
+        card.set_image(url=image)
+    return card
+
+
 def _compact_embed(title: str, lines: list[str]) -> discord.Embed:
     text, _ = _truncate_lines(lines, _COMPACT_BUDGET)
     return discord.Embed(title=title, description=text, color=_COLOR)

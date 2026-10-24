@@ -160,9 +160,42 @@ def fetch_category_ids(base_url: str,
         return _cats(own)
 
 
+def fetch_preorder_products(base_url: str, term: str = "preorder",
+                            client: httpx.Client | None = None) -> list[dict]:
+    """Fetch products matching a preorder search term, across all pages (with _embed images).
+
+    WP search matches title + content; callers filter to title matches."""
+    base_url = base_url.rstrip("/")
+    if urlparse(base_url).scheme != "https":
+        raise FetchError("base_url must use https")
+
+    def _search(c: httpx.Client) -> list[dict]:
+        products: list[dict] = []
+        page = 1
+        while True:
+            resp = _get(c, f"{base_url}/wp-json/wp/v2/product",
+                        search=term, per_page=100, page=page, _embed="1")
+            batch = resp.json()
+            if not isinstance(batch, list):
+                raise FetchError("unexpected preorder search response shape")
+            products.extend(batch)
+            try:
+                total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
+            except ValueError:
+                total_pages = 1
+            if page >= min(total_pages, MAX_PAGES) or len(products) >= MAX_PRODUCTS:
+                break
+            page += 1
+        return products[:MAX_PRODUCTS]
+
+    if client is not None:
+        return _search(client)
+    with httpx.Client() as own:
+        return _search(own)
+
+
 def fetch_store_products_latest(base_url: str,
                                 client: httpx.Client | None = None) -> list[dict]:
-    """Fetch the newest 100 WooCommerce Store API products (with prices); single page."""
     base_url = base_url.rstrip("/")
     if urlparse(base_url).scheme != "https":
         raise FetchError("base_url must use https")

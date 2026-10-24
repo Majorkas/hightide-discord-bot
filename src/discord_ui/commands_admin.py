@@ -175,6 +175,19 @@ class AdminCog(commands.Cog):
             f"new-stock channel set to {channel.mention}", ephemeral=True)
 
     @config_group.command(
+        name="preorder_channel",
+        description="Channel for the persistent preorders board (full image cards)")
+    async def set_preorder_channel(self, interaction: discord.Interaction,
+                                   channel: discord.TextChannel) -> None:
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            cfg.preorder_channel_id = channel.id
+            session.commit()
+        await interaction.response.send_message(
+            f"preorders channel set to {channel.mention}; the board appears on the next refresh",
+            ephemeral=True)
+
+    @config_group.command(
         name="daily_post_time",
         description="Today-post time (v2: posts at the daily refresh time instead)")
     async def set_daily_post_time(self, interaction: discord.Interaction, hhmm: str) -> None:

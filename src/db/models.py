@@ -56,6 +56,7 @@ class GuildConfig(Base):
     last_daily_post_date: Mapped[str | None] = mapped_column(String, nullable=True)
     wants_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     new_stock_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    preorder_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class WeeklyRecurring(Base):

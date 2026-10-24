@@ -67,7 +67,7 @@ def test_command_surface():
         "this_week_channel", "this_month_channel", "timezone",
         "daily_refresh_time", "include_tba", "announce_channel", "daily_post_time",
         "weekly_list", "weekly_add", "weekly_remove", "weekly_image", "wants_channel",
-        "new_stock_channel",
+        "new_stock_channel", "preorder_channel",
     }
     assert {c.name for c in groups["source"].commands} == {"list", "add", "remove"}
     assert {c.name for c in groups["board"].commands} == {"preview", "refresh", "recreate", "signups"}
