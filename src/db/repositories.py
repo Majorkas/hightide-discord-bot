@@ -4,7 +4,10 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.db.models import BoardPost, Event, EventRolePing, EventSource, EventSignup, GuildConfig, InterestRole, RoleKeyword
+from src.db.models import (
+    BoardPost, Event, EventRolePing, EventSignup, EventSource, GuildConfig,
+    InterestRole, RoleKeyword,
+)
 
 
 def get_or_create_config(session: Session, guild_id: int) -> GuildConfig:

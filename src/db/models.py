@@ -153,7 +153,8 @@ class EventRolePing(Base):
 
 class EventSignup(Base):
     __tablename__ = "event_signups"
-    __table_args__ = (UniqueConstraint("event_id", "user_id"),)
+    # AUTOINCREMENT stops rowid reuse from remapping stale signup buttons to new events.
+    __table_args__ = (UniqueConstraint("event_id", "user_id"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     guild_id: Mapped[int] = mapped_column(BigInteger)
