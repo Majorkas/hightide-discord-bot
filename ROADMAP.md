@@ -35,3 +35,53 @@ Working memory for the build. Plan: `docs/superpowers/plans/2026-10-23-discord-e
 - [x] 4-agent council + final whole-branch review + fix wave (289 tests green, 0 warnings)
 
 **Status: COMPLETE — merge-ready.** 12/12 tasks, 5 milestone councils, final whole-branch review passed.
+
+---
+
+# v2 — Community Features
+
+Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/superpowers/specs/2026-10-24-community-features-design.md`.
+
+## v2 Milestone 1 — Roles foundation ✅ (complete 2026-10-24)
+
+- [x] Task 1: Role tables + DDL + repositories
+- [x] Task 2: `/roles` admin commands + persistent panel + toggle
+- [x] 4-agent council + fixes (role vetting, sqlite_autoincrement, defer-first, panel-id consistency; 622 tests green)
+
+## v2 Milestone 2 — Event pings ⬜
+
+- [ ] Task 3: Keyword matching + first-seen ping pipeline
+- [ ] 4-agent council + fixes
+
+## v2 Milestone 3 — Daily tonight post ⬜
+
+- [ ] Task 4: "Today at Hightide" post + config
+- [ ] 4-agent council + fixes
+
+## v2 Milestone 4 — Sign-ups ⬜
+
+- [ ] Task 5: Signup table + service
+- [ ] Task 6: Signup buttons on week cards + admin list
+- [ ] 4-agent council + fixes
+
+## v2 Milestone 5 — Deck + card ⬜
+
+- [ ] Task 7: `/card` Scryfall lookup
+- [ ] Task 8: `/deck` Moxfield + Archidekt
+- [ ] 4-agent council + fixes
+
+## v2 Milestone 6 — Wants board ⬜
+
+- [ ] Task 9: `/want` commands + board + browse
+- [ ] 4-agent council + fixes
+
+## v2 Milestone 7 — New-product alerts ⬜
+
+- [ ] Task 10: Watched-category alerts
+- [ ] 4-agent council + fixes
+
+## v2 Milestone 8 — Hardening + deploy ⬜
+
+- [ ] Task 11: Permissions/README/full pass
+- [ ] Final whole-branch review
+- [ ] Fly deploy
