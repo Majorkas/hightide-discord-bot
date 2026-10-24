@@ -12,6 +12,12 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
 - **Recurring weekly events**: A "Every week at Hightide" section on the this-week board lists door-ticket-only recurring events (with optional end dates and an image), managed via `/config weekly_*`
 - **User commands**: `/events upcoming` shows all events from today onward, plus date-TBA events, in an ephemeral message
 - **Admin control**: Configure channels, timezone, refresh time, and event sources per server
+- **Interest roles panel + keyword pings**: `/roles setup` posts a button panel where members toggle interest roles; newly seen events whose title matches a role's keywords ping that role once in the announce channel
+- **Tonight post**: At the daily refresh, "Today at Hightide" is posted to the announce channel when events exist today (once per day)
+- **Sign-ups**: Every week-board event card has a Going button with a live count; admins list names with `/board signups`
+- **Card and deck lookup**: `/card` shows a Scryfall card; `/deck` shows a Moxfield or Archidekt deck summary
+- **Wants board**: Members track cards they're looking for with `/want`; a persistent board in the wants channel, entries expire after 30 days
+- **Product alerts**: New products in watched shop categories post once each to the new-stock channel (each category seeds silently the first time it is seen)
 
 ## Setup
 
@@ -78,7 +84,7 @@ Or with the full path:
 .venv/bin/python -m src.bot
 ```
 
-The bot connects to Discord and registers all commands. Check your server to see the `/config`, `/source`, `/board`, and `/events` command groups.
+The bot connects to Discord and registers all commands. Check your server to see the `/config`, `/source`, `/board`, `/events`, `/roles`, `/want` command groups and the `/card` and `/deck` commands.
 
 ## Testing
 
@@ -101,7 +107,7 @@ python -m pytest tests/test_normalize.py::test_parse_dot_prefix_two_digit_year -
 ## Commands
 
 ### Admin Commands
-All admin commands require the **Manage Guild** permission.
+The `/config`, `/source`, `/board` and `/roles` groups require the **Manage Guild** permission.
 
 **`/config this_week_channel <#channel>`**
 - Sets the Discord channel where the current-week board (Mon–Sun, starting from today) posts.
@@ -119,6 +125,21 @@ All admin commands require the **Manage Guild** permission.
 
 **`/config include_tba <true|false>`**
 - Controls whether a "Date TBA" section appears on boards for events without known dates.
+
+**`/config announce_channel <#channel>`**
+- Channel for new-event keyword pings and the daily "Today at Hightide" post.
+
+**`/config daily_post_time <HH:MM>`**
+- Stored for the Today post, but for now the post goes out at the daily refresh time.
+
+**`/config wants_channel <#channel>`**
+- Channel for the persistent wants board. Moving it posts a fresh board in the new channel and removes the old one (best effort).
+
+**`/config new_stock_channel <#channel>`**
+- Channel for new-product alerts.
+
+**`/config new_stock_categories <slugs>`**
+- Comma-separated shop category slugs to watch (up to 10, e.g. `pre-orders`).
 
 **`/config weekly_list`**
 - Lists recurring weekly events (including disabled ones) with their IDs.
@@ -149,16 +170,54 @@ All admin commands require the **Manage Guild** permission.
 - Shows a preview of the board for the chosen period (ephemeral, admin only).
 
 **`/board refresh`**
-- Force an immediate fetch and board update.
+- Force an immediate fetch and board update. Also updates the wants board and checks for new products, like the daily refresh.
+
+**`/board signups <event>`**
+- Lists who pressed Going on an event (ephemeral; event autocompletes).
 
 **`/board recreate <this_week|this_month>`**
 - Recreates the board message for the chosen period (useful if the message is lost).
 
+**`/roles setup <#channel>`**
+- Posts (or updates) the roles panel; switching channels removes the old panel.
+
+**`/roles add <role> <label> [emoji]`**
+- Adds an interest role to the panel (up to the panel limit).
+
+**`/roles remove <id>`**
+- Removes an interest role by ID from `/roles list`.
+
+**`/roles keyword <id> <add|remove> <keyword>`**
+- Adds or removes a title keyword that pings the role for newly seen events.
+
+**`/roles list`**
+- Lists interest roles, IDs and keywords.
+
 ### User Commands
+Public: no special permission is needed beyond View Channels and Embed Links (`/want remove` also lets Manage Guild members remove anyone's want).
 
 **`/events upcoming`**
 - Shows all events from today onward, plus date-TBA events, in an ephemeral message.
-- No permissions required beyond View Channels and Embed Links.
+
+**`/card <name>`**
+- Looks up a Magic card on Scryfall and posts it publicly. Rate limited per user.
+
+**`/deck <url>`**
+- Shows a summary of a Moxfield or Archidekt deck, posted publicly. Rate limited per user.
+
+**`/want add <card> [note]`**
+- Adds a card you're looking for to the wants board (max 10 active per user; expires after 30 days).
+
+**`/want browse`**
+- Shows everyone's active wants (ephemeral).
+
+**`/want list`**
+- Lists your own wants with IDs (ephemeral).
+
+**`/want remove <id>`**
+- Removes one of your wants by ID.
+
+**Daily refresh behavior:** the pings, tonight post, wants board and product alerts are best-effort steps that run once per day. A failure in one of them never triggers a same-day retry by itself (only the event fetch and the week/month boards drive retry/backoff), so a missed ping, post or alert waits for the next day's run or a manual `/board refresh`.
 
 ## Discord Permissions
 
@@ -169,15 +228,18 @@ Add the bot to your server with the following permissions:
 - **Embed Links** — display rich event embeds
 - **Manage Messages** — update and delete board messages
 - **Read Message History** — fetch stored message content for board updates
+- **Manage Roles** — assign and remove the interest roles members pick on the roles panel
+
+**Role hierarchy:** the bot's role must sit **above** the interest roles it assigns (Server Settings → Roles, drag the bot's role higher). Discord refuses role changes for roles at or above the bot's own, regardless of the Manage Roles permission. `/roles add` rejects @everyone, integration-managed roles, roles the bot can't assign, and roles with privileged permissions.
 
 **OAuth2 scopes**: `bot` and `applications.commands`
 
 **Invite URL template**:
 ```
-https://discord.com/api/oauth2/authorize?client_id=1563111587500400660&permissions=93184&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=1563111587500400660&permissions=268528640&scope=bot%20applications.commands
 ```
 
-(Adjust the `permissions` parameter if you enable additional features.)
+(Adjust the `permissions` parameter if you enable additional features. The integer above is the five permissions listed plus Manage Roles. Existing installs must re-invite or grant Manage Roles manually.)
 
 ## Deployment
 
@@ -250,10 +312,17 @@ src/
     board_service.py        # Board window logic and rendering
     event_service.py        # Event upsert, dedup, and stale detection
     scheduler.py            # Daily refresh and month-rollover scheduling
+    role_service.py         # Interest roles and keyword pings
+    signup_service.py       # Going-button sign-ups
+    deck_service.py         # Scryfall card and Moxfield/Archidekt deck lookups
+    want_service.py         # Wants board
+    product_service.py      # New-product alerts
 
   discord_ui/
     commands_admin.py       # Admin slash commands
     commands_user.py        # User slash commands
+    commands_roles.py       # /roles, /card, /deck, /want
+    role_views.py           # Roles panel and sign-up buttons
     embeds.py               # Embed building
 
 tests/                       # pytest suite with fixtures
@@ -271,6 +340,9 @@ tests/                       # pytest suite with fixtures
 - Verify the bot has **View Channels** and **Embed Links** permissions in the server.
 - Check that your `DISCORD_TOKEN` is valid.
 
+**`/roles add` says it can't assign a role, or panel buttons fail:**
+- Give the bot **Manage Roles** and move its role above the interest roles.
+
 **Events not updating:**
 - Run `/board refresh` to trigger an immediate fetch.
 - Check bot logs for HTTP or parsing errors.
@@ -282,6 +354,7 @@ tests/                       # pytest suite with fixtures
 
 **Board channel moved via `/config`:**
 - The previous board message stays in the old channel (delete it manually if unwanted); it is not reposted as a duplicate.
+- Exception: moving `/config wants_channel` or re-running `/roles setup` in another channel removes the old wants board / roles panel automatically (best effort).
 
 **Secret management on Fly.io**:
 - `fly secrets set` puts values in your shell history. For sensitive tokens, use stdin instead:

@@ -83,6 +83,15 @@ def test_command_surface():
     assert {c.name for c in groups["events"].commands} == {"upcoming"}
     for g in groups.values():
         assert g.guild_only is True
+    # /card and /deck are standalone commands; the rest are groups.
+    assert {n for n, c in groups.items() if isinstance(c, discord.app_commands.Command)} == {
+        "card", "deck"}
+    # Only the Manage-Guild groups are gated; subcommands never carry their own gate.
+    gated = {n for n, c in groups.items() if c.default_permissions is not None}
+    assert gated == {"config", "source", "board", "roles"}
+    for g in groups.values():
+        for sub in getattr(g, "commands", []):
+            assert sub.default_permissions is None
 
 
 async def test_set_week_channel(db, cog, interaction):
