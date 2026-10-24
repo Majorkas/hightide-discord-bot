@@ -16,7 +16,7 @@ from src.discord_ui import commands_admin
 from src.discord_ui.commands_admin import AdminCog
 from src.scraping import fetcher
 from src.scraping.fetcher import (
-    FetchError, fetch_event_category_ids, fetch_latest_products,
+    FetchError, fetch_category_ids, fetch_latest_products,
 )
 from src.services import product_service, scheduler
 from src.services.product_service import check_new_products, post_product_alerts
@@ -28,6 +28,8 @@ BASE = "https://shop.example.com"
 TZ = ZoneInfo("Australia/Perth")
 EVENT_CAT = 76
 TCG_EVENTS_CAT = 107
+SNACKS_CAT = 138
+SOFT_DRINKS_CAT = 133
 
 
 def _product(pid, title="Foo Set", link=None, content="", image=None, cats=None):
@@ -62,10 +64,12 @@ def patch_fetch(monkeypatch):
     state = {"products": [],
              "cats": [{"id": EVENT_CAT, "slug": "events", "name": "Events"},
                       {"id": TCG_EVENTS_CAT, "slug": "tcg-events", "name": "TCG events"},
+                      {"id": SNACKS_CAT, "slug": "snacks", "name": "Snacks"},
+                      {"id": SOFT_DRINKS_CAT, "slug": "soft-drinks", "name": "Soft Drinks"},
                       {"id": 95, "slug": "mtg", "name": "MTG"}],
              "requests": [], "store": [], "store_calls": []}
     real_latest = fetch_latest_products
-    real_cat_ids = fetch_event_category_ids
+    real_cat_ids = fetch_category_ids
 
     def fake_latest(base_url, client=None):
         with _shop(state, state["requests"]) as c:
@@ -82,7 +86,7 @@ def patch_fetch(monkeypatch):
         return state["store"]
 
     monkeypatch.setattr(product_service, "fetch_latest_products", fake_latest)
-    monkeypatch.setattr(product_service, "fetch_event_category_ids", fake_cat_ids)
+    monkeypatch.setattr(product_service, "fetch_category_ids", fake_cat_ids)
     monkeypatch.setattr(product_service, "fetch_store_products_latest", fake_store)
     return state
 
@@ -113,7 +117,7 @@ def _markers(session, guild=GUILD):
         if r.external_id.startswith("seeded")}
 
 
-# --- fetcher: latest products + event categories ---
+# --- fetcher: latest products + categories ---
 
 def test_fetch_latest_products_params():
     seen: list[httpx.Request] = []
@@ -141,7 +145,7 @@ def test_fetch_latest_products_requires_https_and_list_shape():
             fetch_latest_products(BASE, client=c)
 
 
-def test_fetch_event_category_ids_filters_events_slugs():
+def test_fetch_category_ids_maps_all_valid_slugs():
     cats = [
         {"id": 76, "slug": "events"}, {"id": 107, "slug": "tcg-events"},
         {"id": 95, "slug": "mtg"}, {"id": 5, "slug": "events2"},
@@ -150,27 +154,33 @@ def test_fetch_event_category_ids_filters_events_slugs():
     ]
     with httpx.Client(transport=httpx.MockTransport(
             lambda r: httpx.Response(200, json=cats))) as c:
-        got = fetch_event_category_ids(BASE + "/", client=c)
-    assert got == {76, 107}
+        got = fetch_category_ids(BASE + "/", client=c)
+    assert got == {"events": 76, "tcg-events": 107, "mtg": 95, "events2": 5}
 
 
-def test_fetch_event_category_ids_paginates():
+def test_fetch_category_ids_paginates():
     def handler(request):
         page = int(request.url.params["page"])
         body = [[{"id": 1, "slug": "events"}], [{"id": 2, "slug": "mtg-events"}]][page - 1]
         return httpx.Response(200, json=body, headers={"X-WP-TotalPages": "2"})
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as c:
-        assert fetch_event_category_ids(BASE, client=c) == {1, 2}
+        assert fetch_category_ids(BASE, client=c) == {"events": 1, "mtg-events": 2}
 
 
-def test_fetch_event_category_ids_requires_https_and_list_shape():
+def test_fetch_category_ids_requires_https_and_list_shape():
     with pytest.raises(FetchError):
-        fetch_event_category_ids("http://shop.example.com")
+        fetch_category_ids("http://shop.example.com")
     with httpx.Client(transport=httpx.MockTransport(
             lambda r: httpx.Response(200, json={"code": "x"}))) as c:
         with pytest.raises(FetchError):
-            fetch_event_category_ids(BASE, client=c)
+            fetch_category_ids(BASE, client=c)
+
+
+def test_excluded_category_ids_events_and_consumables():
+    cat_ids = {"events": 76, "tcg-events": 107, "snacks": 138, "soft-drinks": 133,
+               "mtg": 95, "pre-orders": 145, "events2": 5}
+    assert product_service._excluded_category_ids(cat_ids) == {76, 107, 138, 133}
 
 
 def test_fetch_store_products_latest_params():
@@ -255,10 +265,23 @@ def test_event_category_products_never_alert(db, patch_fetch):
     assert [p["external_id"] for p in got] == ["wp:4"]
 
 
-def test_event_products_are_not_recorded_at_seed(db, patch_fetch):
-    patch_fetch["products"] = [_product(1, "Weekly Draft", cats=[EVENT_CAT]), _product(2)]
+def test_snacks_and_soft_drinks_never_alert(db, patch_fetch):
+    patch_fetch["products"] = [_product(1)]
+    check_new_products(db, GUILD, BASE, TZ)  # seed
+    patch_fetch["products"] = [
+        _product(2, "Smith's Chicken Chips", cats=[SNACKS_CAT]),
+        _product(3, "Powerade Berry Ice", cats=[SOFT_DRINKS_CAT]),
+        _product(4, "Schweppes Lemonade", cats=[SOFT_DRINKS_CAT, 95]),
+        _product(5, "Dragon Shield Sleeves"),
+    ]
+    got = check_new_products(db, GUILD, BASE, TZ)
+    assert [p["external_id"] for p in got] == ["wp:5"]
+
+
+def test_consumables_are_not_recorded_at_seed(db, patch_fetch):
+    patch_fetch["products"] = [_product(1, "Chips", cats=[SNACKS_CAT]), _product(2)]
     check_new_products(db, GUILD, BASE, TZ)
-    assert _alerted(db) == {"wp:2"}  # event ticket excluded from seeding too
+    assert _alerted(db) == {"wp:2"}  # consumable excluded from seeding too
 
 
 def test_non_dict_product_cat_still_alerts(db, patch_fetch):
@@ -282,7 +305,7 @@ def test_cat_fetch_failure_on_first_run_raises_and_records_nothing(db, patch_fet
     def boom(base_url, client=None):
         raise FetchError("down")
 
-    monkeypatch.setattr(product_service, "fetch_event_category_ids", boom)
+    monkeypatch.setattr(product_service, "fetch_category_ids", boom)
     with pytest.raises(FetchError):
         check_new_products(db, GUILD, BASE, TZ)
     assert db.execute(select(ProductAlert)).scalars().all() == []
@@ -301,7 +324,7 @@ def test_fetch_failure_after_seed_is_silent(db, patch_fetch, monkeypatch):
     assert {r.external_id for r in db.execute(select(ProductAlert)).scalars()} == before
 
 
-def test_empty_event_cat_set_logs_warning_and_still_alerts(db, patch_fetch, caplog):
+def test_empty_excluded_cat_set_logs_warning_and_still_alerts(db, patch_fetch, caplog):
     patch_fetch["cats"] = [{"id": 95, "slug": "mtg"}]
     patch_fetch["products"] = []
     check_new_products(db, GUILD, BASE, TZ)  # seed
@@ -309,7 +332,7 @@ def test_empty_event_cat_set_logs_warning_and_still_alerts(db, patch_fetch, capl
     with caplog.at_level("WARNING", logger="hightide.products"):
         got = check_new_products(db, GUILD, BASE, TZ)
     assert [p["external_id"] for p in got] == ["wp:1"]  # no exclusion possible
-    assert any("no event categories" in r.message for r in caplog.records)
+    assert any("no excluded categories" in r.message for r in caplog.records)
 
 
 def test_per_guild_isolation(db, patch_fetch):

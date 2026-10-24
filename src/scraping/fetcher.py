@@ -124,15 +124,15 @@ def fetch_latest_products(base_url: str,
         return _latest(own)
 
 
-def fetch_event_category_ids(base_url: str,
-                             client: httpx.Client | None = None) -> set[int]:
-    """Ids of product categories whose slug is 'events' or ends with '-events'."""
+def fetch_category_ids(base_url: str,
+                       client: httpx.Client | None = None) -> dict[str, int]:
+    """Map of every product category slug -> id."""
     base_url = base_url.rstrip("/")
     if urlparse(base_url).scheme != "https":
         raise FetchError("base_url must use https")
 
-    def _cats(c: httpx.Client) -> set[int]:
-        ids: set[int] = set()
+    def _cats(c: httpx.Client) -> dict[str, int]:
+        out: dict[str, int] = {}
         page = 1
         while True:
             resp = _get(c, f"{base_url}/wp-json/wp/v2/product_cat", per_page=100, page=page)
@@ -143,10 +143,8 @@ def fetch_event_category_ids(base_url: str,
                 if not isinstance(cat, dict):
                     continue
                 slug, cid = cat.get("slug"), cat.get("id")
-                if (isinstance(slug, str) and isinstance(cid, int)
-                        and not isinstance(cid, bool)
-                        and (slug == "events" or slug.endswith("-events"))):
-                    ids.add(cid)
+                if isinstance(slug, str) and isinstance(cid, int) and not isinstance(cid, bool):
+                    out.setdefault(slug, cid)
             try:
                 total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
             except ValueError:
@@ -154,7 +152,7 @@ def fetch_event_category_ids(base_url: str,
             if page >= min(total_pages, MAX_PAGES):
                 break
             page += 1
-        return ids
+        return out
 
     if client is not None:
         return _cats(client)

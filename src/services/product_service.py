@@ -10,7 +10,7 @@ from src.db.repositories import (
 )
 from src.discord_ui.embeds import _link, _md_escape, _safe_url
 from src.scraping.fetcher import (
-    FetchError, fetch_event_category_ids, fetch_latest_products, fetch_store_products_latest,
+    FetchError, fetch_category_ids, fetch_latest_products, fetch_store_products_latest,
 )
 from src.scraping.hightide_parser import (
     MAX_PRICE_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS, _image_url,
@@ -27,6 +27,14 @@ _MAX_MINOR_UNIT = 4
 _MAX_AFFIX_CHARS = 8
 MAX_ALERTS_PER_RUN = 10
 _MAX_IMAGE_URL_CHARS = 2000
+# Category slugs never alerted on: consumables (event tickets are excluded separately).
+_EXCLUDED_SLUGS = frozenset({"snacks", "soft-drinks"})
+
+
+def _excluded_category_ids(cat_ids: dict[str, int]) -> set[int]:
+    """Category ids to skip: events plus the hardcoded consumable slugs."""
+    return {cid for slug, cid in cat_ids.items()
+            if slug == "events" or slug.endswith("-events") or slug in _EXCLUDED_SLUGS}
 
 
 def _to_alert(product: dict) -> dict | None:
@@ -99,16 +107,16 @@ def check_new_products(session: Session, guild_id: int, base_url: str, tz) -> li
     seeded = _SEED_MARKER in alerted
 
     try:
-        event_cats = fetch_event_category_ids(base_url)
+        excluded = _excluded_category_ids(fetch_category_ids(base_url))
         products = fetch_latest_products(base_url)
     except (FetchError, httpx.HTTPError, ValueError, KeyError, TypeError) as e:
-        # Without the category list event tickets can't be excluded; never risk posting those.
+        # Without the category list excluded products can't be filtered; never risk posting those.
         if not seeded:
             raise FetchError(f"cannot seed; product fetch failed: {e}") from e
         log.warning("latest-products fetch failed (seeded run, skipping): %s", e)
         return []
-    if not event_cats:
-        log.warning("no event categories found; event tickets will not be excluded")
+    if not excluded:
+        log.warning("no excluded categories found; event tickets and consumables will not be filtered")
 
     found: dict[str, dict] = {}
     for product in products:
@@ -116,9 +124,9 @@ def check_new_products(session: Session, guild_id: int, base_url: str, tz) -> li
             continue
         cats = product.get("product_cat")
         if isinstance(cats, list) and any(
-                isinstance(c, int) and not isinstance(c, bool) and c in event_cats
+                isinstance(c, int) and not isinstance(c, bool) and c in excluded
                 for c in cats):
-            continue  # event tickets are covered by the boards
+            continue  # event tickets and consumables
         title = product.get("title", {})
         title = title.get("rendered", "") if isinstance(title, dict) else ""
         if isinstance(title, str) and is_junk_title(title):
