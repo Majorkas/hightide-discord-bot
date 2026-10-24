@@ -48,10 +48,10 @@ Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/sup
 - [x] Task 2: `/roles` admin commands + persistent panel + toggle
 - [x] 4-agent council + fixes (role vetting, sqlite_autoincrement, defer-first, panel-id consistency; 622 tests green)
 
-## v2 Milestone 2 — Event pings ⬜
+## v2 Milestone 2 — Event pings ✅ (complete 2026-10-24)
 
-- [ ] Task 3: Keyword matching + first-seen ping pipeline
-- [ ] 4-agent council + fixes
+- [x] Task 3: Keyword matching + first-seen ping pipeline
+- [x] 4-agent council + fixes (pending-pings scan, ping caps, bootstrap silence, whitespace-folded matching; 675 tests green)
 
 ## v2 Milestone 3 — Daily tonight post ⬜
 
