@@ -7,7 +7,7 @@ from discord.ext import tasks
 from sqlalchemy import select
 
 from src import config
-from src.db.models import GuildConfig
+from src.db.models import Event, GuildConfig
 from src.db.repositories import get_or_create_config
 from src.db.session import get_session_factory
 from src.services.board_service import upsert_board
@@ -67,7 +67,9 @@ async def _run_daily_refresh_locked(bot, guild_id: int, *, fetch: bool) -> dict:
     with _get_session_factory()() as session:
         cfg = get_or_create_config(session, guild_id)
         tz = ZoneInfo(cfg.timezone)
+        had_prior = False
         if fetch:
+            had_prior = session.query(Event).filter_by(guild_id=guild_id).first() is not None
             try:
                 events = await asyncio.to_thread(
                     refresh_events, session, guild_id, "https://hightidetabletop.com.au", tz
@@ -83,14 +85,15 @@ async def _run_daily_refresh_locked(bot, guild_id: int, *, fetch: bool) -> dict:
             # Keep ORM rows out of the result dict that gets logged and returned.
             created_events = events.pop("created_events", [])
         result = {"events": events}
-        if created_events:
+        if isinstance(events, dict):
+            # Candidates come from the DB; a first-ever sync is seeded silently.
             try:
                 result["pings"] = await ping_new_events(
-                    bot, session, guild_id, created_events, tz)
-            except Exception as e:
+                    bot, session, guild_id, tz, suppress=not had_prior)
+            except Exception:
                 log.exception("event pings failed")
                 session.rollback()
-                result["pings"] = f"error:{type(e).__name__}"
+                result["pings"] = 0
         for board_type in ("this_week", "this_month"):
             try:
                 result[board_type] = await upsert_board(bot, session, guild_id, board_type)
@@ -144,7 +147,7 @@ class RefreshScheduler:
             result = await run_daily_refresh(self.bot, cfg.guild_id, fetch=fetch)
             has_error = any(
                 isinstance(v, str) and v.startswith("error:")
-                for v in result.values()
+                for k, v in result.items() if k != "pings"
             )
             if isinstance(result.get("events"), dict):
                 self._events_done_key[guild_id] = today
