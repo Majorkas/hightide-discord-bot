@@ -70,10 +70,10 @@ Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/sup
 - [x] Task 8: `/deck` Moxfield + Archidekt
 - [x] 4-agent council + fixes (cooldowns, ambiguity handling, timeouts; 1209 tests green)
 
-## v2 Milestone 6 — Wants board ⬜
+## v2 Milestone 6 — Wants board ✅ (complete 2026-10-24)
 
-- [ ] Task 9: `/want` commands + board + browse
-- [ ] 4-agent council + fixes
+- [x] Task 9: `/want` commands + alphabetical Scryfall-linked board + browse + daily expiry
+- [x] 4-agent council + fixes (channel-move cleanup, input rejection, host pinning, accent sort; 1366 tests green)
 
 ## v2 Milestone 7 — New-product alerts ⬜
 
