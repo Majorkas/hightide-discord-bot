@@ -21,7 +21,9 @@ from src.discord_ui.embeds import _md_escape
 from src.discord_ui.role_views import (
     MAX_PANEL_ROLES, RolesPanelView, build_roles_panel_embed,
 )
-from src.services.deck_service import build_card_embed, scryfall_card
+from src.services.deck_service import (
+    build_card_embed, build_deck_embed, fetch_deck, parse_deck_url, scryfall_card,
+)
 
 log = logging.getLogger("hightide.discord_ui.commands_roles")
 
@@ -30,6 +32,7 @@ _MAX_EMOJI_LEN = 64
 _MAX_KEYWORD_LEN = 100
 _MAX_MESSAGE_CHARS = 1900
 _MAX_CARD_NAME_LEN = 100
+_MAX_DECK_URL_LEN = 500
 _PANEL_GONE_NOTE = " The panel message is gone — run /roles setup to post it again."
 _PANEL_FORBIDDEN_NOTE = (" I couldn't update the panel (missing permission to view or edit "
                          "it) — check my channel permissions.")
@@ -388,3 +391,39 @@ class RolesCog(commands.Cog):
         # Success: build and send embed (public)
         embed = build_card_embed(card)
         await interaction.response.send_message(embed=embed, ephemeral=False)
+
+    # Top-level /deck command (public on success, like /card)
+    @app_commands.command(
+        name="deck",
+        description="Show a Moxfield or Archidekt deck"
+    )
+    @app_commands.guild_only()
+    async def deck_lookup(self, interaction: discord.Interaction, url: str) -> None:
+        """Show a summary embed for a Moxfield or Archidekt deck link."""
+        if len(url) > _MAX_DECK_URL_LEN:
+            await interaction.response.send_message(
+                f"Deck link must be ≤{_MAX_DECK_URL_LEN} characters.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            deck = await fetch_deck(url, retries=False, timeout=2.5)
+        except Exception as e:
+            parsed = parse_deck_url(url)
+            site = parsed[0] if parsed else "The deck site"
+            log.warning(f"/deck lookup failed for {site}: {e!r}")
+            await interaction.response.send_message(
+                f"{site} is having trouble — try again shortly.",
+                ephemeral=True
+            )
+            return
+
+        if deck is None:
+            await interaction.response.send_message(
+                "Couldn't read that deck — check the link.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(embed=build_deck_embed(deck), ephemeral=False)

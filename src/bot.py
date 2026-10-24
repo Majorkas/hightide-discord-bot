@@ -57,6 +57,7 @@ def create_bot() -> commands.Bot:
     roles_cog = RolesCog(bot)
     bot.tree.add_command(roles_cog.roles_group)
     bot.tree.add_command(roles_cog.card_lookup)  # Top-level /card command
+    bot.tree.add_command(roles_cog.deck_lookup)  # Top-level /deck command
 
     @bot.event
     async def setup_hook() -> None:

@@ -1,0 +1,166 @@
+{
+ "id": 1,
+ "name": "Fun With Fungus",
+ "deckFormat": 3,
+ "featured": "https://storage.googleapis.com/archidekt-card-images/tsp/92b0be6d-9183-4938-b7a1-ae7f04ba78a0_art_crop.jpg",
+ "customFeatured": "",
+ "private": false,
+ "unlisted": false,
+ "cards": [
+  {
+   "quantity": 1,
+   "categories": [
+    "Commander"
+   ],
+   "card": {
+    "oracleCard": {
+     "name": "Thelon of Havenwood"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Mana Crypt"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Spread the Sickness"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Plaguemaw Beast"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Contagion Engine"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Contagion Clasp"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Doubling Season"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Psychotrope Thallid"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Deathspore Thallid"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Thallid Germinator"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Sporesower Thallid"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Savage Thallid"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Thallid"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Feral Thallid"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Door of Destinies"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Parallel Lives"
+    }
+   }
+  },
+  {
+   "quantity": 1,
+   "categories": null,
+   "card": {
+    "oracleCard": {
+     "name": "Westvale Abbey // Ormendahl, Profane Prince"
+    }
+   }
+  }
+ ]
+}

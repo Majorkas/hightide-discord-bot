@@ -1,0 +1,19 @@
+{
+ "id": "oEWXWHM5eEGMmopExLWRCA",
+ "name": "Atraxa, Praetors' Voice [Test]",
+ "format": "commander",
+ "publicUrl": "https://www.moxfield.com/decks/oEWXWHM5eEGMmopExLWRCA",
+ "mainboardCount": 99,
+ "commandersCount": 1,
+ "sideboardCount": 0,
+ "commanders": {
+  "Atraxa, Praetors' Voice": {
+   "quantity": 1,
+   "card": {
+    "id": "abc",
+    "name": "Atraxa, Praetors' Voice",
+    "scryfall_id": "d0d33d52-3d28-4635-b985-51e126289259"
+   }
+  }
+ }
+}
