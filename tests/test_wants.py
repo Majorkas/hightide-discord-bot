@@ -172,6 +172,12 @@ async def test_cap_is_per_user_and_per_guild(session, scry):
         await _add(session, f"Card {n}")
     await _add(session, "Other", user=2)
     await add_want(session, GUILD + 1, 1, "Elsewhere", None, now=NOW)
+    assert want_service._active_count(session, GUILD, 1) == 10
+    assert want_service._active_count(session, GUILD, 2) == 1
+    assert want_service._active_count(session, GUILD + 1, 1) == 1
+    assert want_service._active_count(session, GUILD + 1, 2) == 0
+    with pytest.raises(WantLimitError):
+        await _add(session, "Eleventh")  # the cap still bites user 1 in this guild
 
 
 async def test_cap_counts_only_active(session, scry):
@@ -813,3 +819,402 @@ def test_wants_channel_column_added_to_legacy_db(tmp_path):
     with engine.connect() as conn:
         conn.execute(text("SELECT wants_channel_id FROM guild_config"))
     engine.dispose()
+
+
+# ---------------------------------------------------------------- M6 council: service validation
+
+async def test_cap_race_two_concurrent_adds_exactly_one_wins(session, scry):
+    for n in range(9):
+        await _add(session, f"Card {n}")
+
+    async def yielding(*a, **k):
+        await asyncio.sleep(0)  # let the sibling add interleave at the network await
+        return None
+    scry.side_effect = yielding
+    results = await asyncio.gather(_add(session, "Racer A"), _add(session, "Racer B"),
+                                   return_exceptions=True)
+    assert sum(isinstance(r, CardWant) for r in results) == 1
+    assert sum(isinstance(r, WantLimitError) for r in results) == 1
+    assert want_service._active_count(session, GUILD, 1) == 10
+
+
+@pytest.mark.parametrize("name", [
+    "\u200b", "\u200b\u200b", "\u200e", "\u202e", "\u202a\u202c", "\u2060", "\u2066\u2069",
+    "***", "_", "`", "~~", "||", "*_`~|", "\u200b*\u202e_", " \u200b ",
+])
+async def test_invisible_names_rejected(session, scry, name):
+    with pytest.raises(ValueError, match="nothing visible"):
+        await _add(session, name)
+    scry.assert_not_awaited()
+    assert list_wants(session, GUILD, now=NOW) == []
+
+
+@pytest.mark.parametrize("name", ["\u00a0", "\u3000", "\u2003", "\t\n", " "])
+async def test_whitespace_variant_names_rejected(session, scry, name):
+    with pytest.raises(ValueError):
+        await _add(session, name)
+    assert list_wants(session, GUILD, now=NOW) == []
+
+
+@pytest.mark.parametrize("name", ["\u200bLightning Bolt", "**Bolt**", "Lightning\u200b Bolt", "_x_"])
+async def test_names_with_legit_text_pass(session, scry, name):
+    assert (await _add(session, name)).card_name == name.strip()
+
+
+@pytest.mark.parametrize("name,note", [
+    ("Lightning Bolt", "see https://x"),
+    ("Lightning Bolt", "ftp://x"),
+    ("https://x.test/a", None),
+    ("a://b", None),
+    ("see http://evil", "fine"),
+])
+async def test_urls_rejected_in_name_and_note(session, scry, name, note):
+    with pytest.raises(ValueError, match="Links aren't allowed in card names/notes."):
+        await _add(session, name, note=note)
+    scry.assert_not_awaited()
+    assert list_wants(session, GUILD, now=NOW) == []
+
+
+@pytest.mark.parametrize("name,note", [
+    ("Lightning Bolt", "foil, NM"), ("Fire // Ice", None), ("Who/What/When/Where/Why", "http:/x"),
+    ("Look: here", "see www.example.com"),
+])
+async def test_normal_names_and_notes_pass(session, scry, name, note):
+    w = await _add(session, name, note=note)
+    assert (w.card_name, w.note) == (name, note)
+
+
+@pytest.mark.parametrize("uri,kept", [
+    ("https://scryfall.com/card/msc/806/lightning-bolt", True),
+    ("https://api.scryfall.com/cards/1", True),
+    ("https://SCRYFALL.com/card/x", True),
+    ("https://evil.com/card/x", False),
+    ("https://scryfall.com.evil.com/card/x", False),
+    ("https://notscryfall.com/card/x", False),
+    ("https://scryfall.com@evil.com/card/x", False),
+    ("https://evil.com/?u=scryfall.com", False),
+    ("http://[bad/card", False),
+])
+async def test_scryfall_host_is_pinned(session, scry, uri, kept):
+    scry.return_value = {"scryfall_uri": uri}
+    assert (await _add(session)).scryfall_uri == (uri if kept else None)
+
+
+# ---------------------------------------------------------------- M6 council: ordering
+
+def test_accent_folded_order_in_renderer():
+    wants = [_want("Zebra", id_=1), _want("\u00c9clair", id_=2), _want("\u00c6therize", id_=3),
+             _want("Apple", id_=4), _want("Eagle", id_=5)]
+    order = [ln.split("**")[1] for ln in build_wants_embed(wants, TZ).description.split("\n")]
+    assert order == ["\u00c6therize", "Apple", "Eagle", "\u00c9clair", "Zebra"]
+
+
+async def test_accent_folded_order_in_list_wants(session, scry):
+    for n in ["Zebra", "\u00c9clair", "\u00c6therize", "Apple", "Eagle", "\u00e0 la mode"]:
+        await _add(session, n)
+    names = [w.card_name for w in list_wants(session, GUILD, now=NOW)]
+    assert names == ["\u00e0 la mode", "\u00c6therize", "Apple", "Eagle", "\u00c9clair", "Zebra"]
+
+
+async def test_accent_equal_names_tiebreak_by_id(session, scry):
+    first = await _add(session, "\u00c9clair")
+    second = await _add(session, "Eclair", user=2)
+    assert [w.id for w in list_wants(session, GUILD, now=NOW)] == [first.id, second.id]
+    wants = [_want("Eclair", id_=9), _want("\u00c9clair", id_=3)]
+    assert [ln.split("**")[1] for ln in build_wants_embed(wants, TZ).description.split("\n")] \
+        == ["\u00c9clair", "Eclair"]
+
+
+# ---------------------------------------------------------------- M6 council: board lock / channel move
+
+async def test_board_lock_concurrent_updates_send_once(session, scry):
+    _config_channel(session)
+    channel = _make_channel()
+    msg = _make_msg(900)
+
+    async def slow_send(**kwargs):
+        await asyncio.sleep(0.02)
+        return msg
+    channel.send.side_effect = slow_send
+    channel.fetch_message.return_value = msg
+    bot = _bot(channel)
+    await _add(session, "Lightning Bolt")
+    results = await asyncio.gather(update_wants_board(bot, session, GUILD, now=NOW),
+                                   update_wants_board(bot, session, GUILD, now=NOW))
+    assert sorted(results) == ["created", "skipped"]
+    assert channel.send.await_count == 1
+
+
+OLD_CHANNEL = 111
+BOT_ID = 77
+
+
+def _moved_setup(session, *, get_channel_old=True):
+    """Stored board in OLD_CHANNEL (msg 700), config now points at CHANNEL."""
+    from src.db.repositories import save_board_post
+    _config_channel(session)
+    save_board_post(session, GUILD, "wants", "wants", OLD_CHANNEL, 700, "oldhash")
+    old_ch, new_ch = _make_channel(OLD_CHANNEL), _make_channel(CHANNEL)
+    old_msg, new_msg = _make_msg(700), _make_msg(900)
+    old_msg.author = MagicMock(id=BOT_ID)
+    old_ch.fetch_message.return_value = old_msg
+    new_ch.send.return_value = new_msg
+    bot = MagicMock()
+    bot.user = MagicMock(id=BOT_ID)
+    chans = {OLD_CHANNEL: old_ch, CHANNEL: new_ch}
+    bot.get_channel.side_effect = lambda cid: (
+        None if cid == OLD_CHANNEL and not get_channel_old else chans.get(cid))
+    bot.fetch_channel = AsyncMock(side_effect=lambda cid: chans[cid])
+    return bot, old_ch, new_ch, old_msg
+
+
+async def test_channel_move_posts_new_and_deletes_old(session, scry):
+    bot, old_ch, new_ch, old_msg = _moved_setup(session)
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
+    new_ch.send.assert_awaited_once()
+    old_ch.fetch_message.assert_awaited_once_with(700)
+    old_msg.delete.assert_awaited_once()
+    post = get_board_post(session, GUILD, "wants")
+    assert (post.channel_id, post.message_id) == (CHANNEL, 900)
+    bot.fetch_channel.assert_not_awaited()
+
+
+async def test_channel_move_old_channel_fetch_fallback(session, scry):
+    bot, old_ch, new_ch, old_msg = _moved_setup(session, get_channel_old=False)
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
+    bot.fetch_channel.assert_awaited_once_with(OLD_CHANNEL)
+    old_msg.delete.assert_awaited_once()
+    assert get_board_post(session, GUILD, "wants").channel_id == CHANNEL
+
+
+async def test_channel_move_authorship_guard_keeps_foreign_message(session, scry):
+    bot, old_ch, new_ch, old_msg = _moved_setup(session)
+    old_msg.author = MagicMock(id=BOT_ID + 1)
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
+    old_msg.delete.assert_not_awaited()
+
+
+@pytest.mark.parametrize("where", ["fetch_message", "delete", "fetch_channel"])
+@pytest.mark.parametrize("exc", [
+    _not_found(), discord.Forbidden(MagicMock(status=403), "no"),
+    discord.HTTPException(MagicMock(status=500), "boom"),
+])
+async def test_channel_move_cleanup_failures_are_tolerated(session, scry, where, exc):
+    bot, old_ch, new_ch, old_msg = _moved_setup(session, get_channel_old=(where != "fetch_channel"))
+    if where == "fetch_message":
+        old_ch.fetch_message.side_effect = exc
+    elif where == "delete":
+        old_msg.delete.side_effect = exc
+    else:
+        bot.fetch_channel = AsyncMock(
+            side_effect=lambda cid: (_ for _ in ()).throw(exc) if cid == OLD_CHANNEL else new_ch)
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
+    post = get_board_post(session, GUILD, "wants")
+    assert (post.channel_id, post.message_id) == (CHANNEL, 900)
+
+
+async def test_channel_move_save_failure_leaves_old_message(session, scry):
+    bot, old_ch, new_ch, old_msg = _moved_setup(session)
+    with patch("src.services.want_service.save_board_post", side_effect=RuntimeError("db")):
+        with pytest.raises(RuntimeError):
+            await update_wants_board(bot, session, GUILD, now=NOW)
+    old_msg.delete.assert_not_awaited()
+    new_ch.send.return_value.delete.assert_awaited_once()
+
+
+async def test_same_channel_never_deletes_anything(session, scry):
+    _config_channel(session)
+    channel = _make_channel()
+    msg = _make_msg(900)
+    channel.send.return_value = msg
+    channel.fetch_message.return_value = msg
+    bot = _bot(channel)
+    await update_wants_board(bot, session, GUILD, now=NOW)
+    await _add(session)
+    await update_wants_board(bot, session, GUILD, now=NOW)
+    msg.delete.assert_not_awaited()
+
+
+# ---------------------------------------------------------------- M6 council: handlers
+
+async def test_want_add_cooldown_is_per_user_not_global():
+    import uuid
+    from discord import app_commands
+    u1, u2 = uuid.uuid4().int >> 64, uuid.uuid4().int >> 64
+    cmd = RolesCog.want_add
+
+    def at(uid, offset):
+        i = _interaction(uid)
+        i.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=offset)
+        return i
+    assert await cmd._check_can_run(at(u1, 0)) is True
+    assert await cmd._check_can_run(at(u2, 1)) is True  # other user, inside u1's window
+    with pytest.raises(app_commands.CommandOnCooldown):
+        await cmd._check_can_run(at(u1, 2))
+    with pytest.raises(app_commands.CommandOnCooldown):
+        await cmd._check_can_run(at(u2, 2))
+    assert await cmd._check_can_run(at(u1, 7)) is True
+
+
+def _perth_boundary_created():
+    """17:00 UTC two days ago: the UTC date differs from the Perth (UTC+8) date."""
+    c = (datetime.now(timezone.utc) - timedelta(days=2)).replace(
+        hour=17, minute=0, second=0, microsecond=0)
+    perth, utc = (c + timedelta(hours=8)).strftime("%b %d"), c.strftime("%b %d")
+    assert perth != utc
+    return c, perth, utc
+
+
+def test_board_renders_perth_date_not_utc():
+    created = datetime(2026, 10, 23, 17, 0, tzinfo=timezone.utc)  # Perth: Oct 24 01:00
+    d = build_wants_embed([_want("A", created=created, user=7)], TZ).description
+    assert d.endswith("Oct 24") and "Oct 23" not in d
+
+
+async def test_board_post_renders_perth_date(session, scry):
+    _config_channel(session)
+    session.add(_want("A", created=datetime(2026, 10, 23, 17, 0, tzinfo=timezone.utc)))
+    session.commit()
+    channel = _make_channel()
+    channel.send.return_value = _make_msg(900)
+    await update_wants_board(_bot(channel), session, GUILD, now=NOW)
+    d = channel.send.call_args.kwargs["embed"].description
+    assert d.endswith("Oct 24") and "Oct 23" not in d
+
+
+async def test_browse_and_list_render_perth_date(db, cog, scry):
+    _configure(db)
+    created, perth, utc = _perth_boundary_created()
+    with db() as s:
+        s.add(_want("Bolt", created=created, user=1))
+        s.commit()
+    i = _interaction(user_id=1)
+    await cog.want_browse.callback(cog, i)
+    d = i.response.send_message.call_args.kwargs["embed"].description
+    assert d.endswith(perth) and utc not in d
+    i2 = _interaction(user_id=1)
+    await cog.want_list.callback(cog, i2)
+    text_ = i2.response.send_message.call_args.args[0]
+    assert text_.endswith(perth) and utc not in text_
+
+
+async def test_list_truncates_on_line_boundary(db, cog, scry):
+    import re
+    _configure(db)
+    with db() as s:
+        for n in range(30):
+            s.add(_want(f"{n:02d}" + "*" * 90, note="_" * 20, user=1))
+        s.commit()
+    i = _interaction(user_id=1)
+    await cog.want_list.callback(cog, i)
+    text_ = i.response.send_message.call_args.args[0]
+    assert len(text_) <= commands_roles._MAX_MESSAGE_CHARS
+    lines = text_.split("\n")
+    assert re.fullmatch(r"… \+\d+ more", lines[-1])
+    kept = lines[:-1]
+    assert 0 < len(kept) < 30 and len(kept) + int(lines[-1].split("+")[1].split()[0]) == 30
+    line_re = re.compile(r"#\d+ \*\*(?:\\.|[^*\\])+\*\* · (?:\\.|[^*\\])+ · [A-Z][a-z]{2} \d{2}")
+    assert all(line_re.fullmatch(ln) for ln in kept)  # every kept line is whole, escapes intact
+    assert not text_.endswith("\\")
+
+
+async def test_remove_replies_exact_and_board_untouched_for_stranger(db, cog, scry):
+    _configure(db)
+    await cog.want_add.callback(cog, _interaction(user_id=1), "A", None)
+    with db() as s:
+        wid = s.execute(select(CardWant)).scalar_one().id
+    cog.msg.edit.reset_mock()
+    cog.channel.send.reset_mock()
+
+    stranger = _interaction(user_id=2)
+    await cog.want_remove.callback(cog, stranger, wid)
+    text_, kw = _sent(stranger)
+    assert text_ == (f"No want #{wid} found — you can only remove your own wants "
+                     "(see /want list).")
+    assert kw["ephemeral"] is True
+    cog.msg.edit.assert_not_awaited()
+    cog.channel.send.assert_not_awaited()
+    with db() as s:
+        assert s.execute(select(CardWant)).scalar_one().active is True
+
+    owner = _interaction(user_id=1)
+    await cog.want_remove.callback(cog, owner, wid)
+    text_, kw = _sent(owner)
+    assert text_ == f"Removed want #{wid}." and kw["ephemeral"] is True
+    assert cog.msg.edit.call_args.kwargs["embed"].description == "No active wants."
+
+
+async def test_admin_removes_someone_elses_want(db, cog, scry):
+    _configure(db)
+    await cog.want_add.callback(cog, _interaction(user_id=1), "A", None)
+    with db() as s:
+        wid = s.execute(select(CardWant)).scalar_one().id
+    admin = _interaction(user_id=3, manage_guild=True)
+    await cog.want_remove.callback(cog, admin, wid)
+    text_, kw = _sent(admin)
+    assert text_ == f"Removed want #{wid}." and kw["ephemeral"] is True
+    with db() as s:
+        assert s.execute(select(CardWant)).first() is None
+
+
+def test_want_remove_id_param_is_range_limited():
+    param = next(p for p in RolesCog.want_remove.parameters if p.name == "want_id")
+    assert (param.min_value, param.max_value) == (1, 2**31 - 1)
+
+
+@pytest.mark.parametrize("bad", [0, -5, 2**31])
+async def test_remove_out_of_range_id_rejected_cleanly(db, cog, scry, bad):
+    _configure(db)
+    i = _interaction(user_id=1, manage_guild=True)
+    await cog.want_remove.callback(cog, i, bad)
+    text_, kw = _sent(i)
+    assert kw["ephemeral"] is True and f"No want #{bad} found" in text_
+    cog.msg.edit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("name", ["\u200b", "\u202e", "***", " "])
+async def test_add_handler_rejects_invisible_names_ephemerally(db, cog, scry, name):
+    _configure(db)
+    i = _interaction()
+    await cog.want_add.callback(cog, i, name, None)
+    text_, kw = _sent(i)
+    assert kw["ephemeral"] is True and "card name" in text_.lower()
+    scry.assert_not_awaited()
+    cog.channel.send.assert_not_awaited()
+    with db() as s:
+        assert s.execute(select(CardWant)).first() is None
+
+
+async def test_add_handler_rejects_urls_ephemerally(db, cog, scry):
+    _configure(db)
+    for name, note in [("Lightning Bolt", "see https://x"), ("https://x.test", None)]:
+        i = _interaction()
+        await cog.want_add.callback(cog, i, name, note)
+        text_, kw = _sent(i)
+        assert text_ == "Links aren't allowed in card names/notes." and kw["ephemeral"] is True
+    scry.assert_not_awaited()
+    i = _interaction()
+    await cog.want_add.callback(cog, i, "Lightning Bolt", "foil NM")
+    assert "Added to the wants board" in _sent(i)[0]
+
+
+@pytest.mark.parametrize("which", ["add", "remove"])
+async def test_board_failure_rolls_back_session(db, cog, scry, which):
+    _configure(db)
+    await cog.want_add.callback(cog, _interaction(user_id=1), "A", None)
+    with db() as s:
+        wid = s.execute(select(CardWant)).scalar_one().id
+    rolled = []
+
+    async def boom(bot, session, guild_id, **kw):
+        orig = session.rollback
+        session.rollback = lambda: (rolled.append(1), orig())[1]
+        raise RuntimeError("board down")
+    with patch("src.discord_ui.commands_roles.update_wants_board", boom):
+        i = _interaction(user_id=1)
+        if which == "add":
+            await cog.want_add.callback(cog, i, "B", None)
+        else:
+            await cog.want_remove.callback(cog, i, wid)
+    assert rolled == [1]
+    assert "couldn't update the board" in _sent(i)[0]
