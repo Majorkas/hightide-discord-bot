@@ -206,9 +206,7 @@ class TestScryfallCardFuzzy:
             mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "503", request=MagicMock(), response=mock_response
             )
-            mock_client.get.side_effect = httpx.HTTPStatusError(
-                "503", request=MagicMock(), response=mock_response
-            )
+            mock_client.get.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             with pytest.raises(httpx.HTTPStatusError):
@@ -367,9 +365,7 @@ class TestRetryPolicies:
             mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "503", request=MagicMock(), response=mock_response
             )
-            mock_client.get.side_effect = httpx.HTTPStatusError(
-                "503", request=MagicMock(), response=mock_response
-            )
+            mock_client.get.return_value = mock_response
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
             try:
@@ -390,9 +386,7 @@ class TestRetryPolicies:
             mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "503", request=MagicMock(), response=mock_response
             )
-            mock_client.get.side_effect = httpx.HTTPStatusError(
-                "503", request=MagicMock(), response=mock_response
-            )
+            mock_client.get.return_value = mock_response
 
             mock_client_class.return_value.__aenter__.return_value = mock_client
 
@@ -540,6 +534,9 @@ class TestCardCommandHandler:
             # Get the callback from the Command object
             callback = cog.card_lookup.callback
             await callback(cog, mock_interaction, "Lightning Bolt")
+            
+            # Should call scryfall_card with retries=False and timeout=2.5
+            mock_card.assert_called_once_with("Lightning Bolt", retries=False, timeout=2.5)
             
             # Should call send_message with embed and ephemeral=False
             mock_interaction.response.send_message.assert_called_once()
