@@ -1,4 +1,5 @@
 """Signup buttons on week cards + /board signups."""
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta
@@ -10,7 +11,10 @@ import discord
 import pytest
 
 from src.bot import create_bot
-from src.db.models import Base, Event, GuildConfig
+from sqlalchemy import select
+from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
+
+from src.db.models import Base, Event, EventSignup, GuildConfig, WeeklyRecurring
 from src.db.repositories import get_board_post
 from src.db.session import get_engine, get_session_factory
 from src.discord_ui import commands_admin
@@ -37,10 +41,16 @@ def db(tmp_path, monkeypatch):
     factory.kw["bind"].dispose()
 
 
-def _add_event(db, title="Draft Night", guild_id=GUILD, active=True, ext="wp:1"):
+_DEFAULT = object()
+
+
+def _add_event(db, title="Draft Night", guild_id=GUILD, active=True, ext="wp:1",
+               starts_at=_DEFAULT):
+    if starts_at is _DEFAULT:
+        starts_at = datetime.now(TZ) + timedelta(days=1)
     with db() as s:
         e = Event(guild_id=guild_id, external_id=ext, title=title, url="https://x/e",
-                  starts_at=datetime.now(TZ) + timedelta(days=1), time_known=True,
+                  starts_at=starts_at, time_known=True,
                   is_active=active)
         s.add(e)
         s.commit()
@@ -174,8 +184,21 @@ def cog():
     return AdminCog(MagicMock())
 
 
-def _members(mapping):
-    return MagicMock(get_member=MagicMock(side_effect=lambda uid: mapping.get(uid)))
+def _not_found():
+    return discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "Unknown Member")
+
+
+def _members(mapping, fetched=None):
+    """Guild stub: get_member hits the cache map; fetch_member hits `fetched` else NotFound."""
+    fetched = fetched or {}
+
+    async def fetch(uid):
+        if uid in fetched:
+            return fetched[uid]
+        raise _not_found()
+
+    return MagicMock(get_member=MagicMock(side_effect=lambda uid: mapping.get(uid)),
+                     fetch_member=AsyncMock(side_effect=fetch))
 
 
 async def test_signups_lists_names(db, cog, interaction):
@@ -212,7 +235,7 @@ async def test_signups_empty(db, cog, interaction):
     assert interaction.followup.send.call_args.args[0] == "No signups yet."
 
 
-@pytest.mark.parametrize("value", ["abc", "9999"])
+@pytest.mark.parametrize("value", ["abc", "9999", "²", "-1", "", "1" * 19, "9" * 40])
 async def test_signups_unknown_event(db, cog, interaction, value):
     interaction.guild = _members({})
     await cog.board_signups.callback(cog, interaction, value)
@@ -234,14 +257,14 @@ async def test_autocomplete_active_events_capped(db, cog, interaction):
     choices = await cog.signups_event_autocomplete(interaction, "")
     assert len(choices) == 25
     assert all(isinstance(c.value, str) and c.value.isdigit() for c in choices)
-    assert not any(c.name in ("Ended one", "Foreign") for c in choices)
+    assert not any(c.name.startswith(("Ended one", "Foreign")) for c in choices)
 
 
 async def test_autocomplete_filters_by_current(db, cog, interaction):
     _add_event(db, title="Commander Night", ext="wp:1")
     _add_event(db, title="Draft Night", ext="wp:2")
     choices = await cog.signups_event_autocomplete(interaction, "draft")
-    assert [c.name for c in choices] == ["Draft Night"]
+    assert [c.name.split(" — ")[0] for c in choices] == ["Draft Night"]
 
 
 # ---- board integration ----
@@ -328,3 +351,366 @@ async def test_count_change_refreshes_card_on_next_edit(session):
     card = channel.messages[json.loads(post.message_ids)[0]]
     assert card.edits[-1]["view"].children[0].label == "✅ Going (1)"
     assert await upsert_board(bot, session, GUILD, "this_week") == "skipped"
+
+
+# ---- council batch: restart dispatch ----
+
+def _signup_message(event_id):
+    from discord.components import ActionRow as ActionRowComponent
+    row = SignupView(event_id).to_components()[0]
+    return SimpleNamespace(id=555, flags=SimpleNamespace(components_v2=False),
+                           components=[ActionRowComponent(row)])
+
+
+def _dispatch(bot, custom_id, message):
+    interaction = MagicMock()
+    interaction.message = message
+    interaction.data = {"custom_id": custom_id, "component_type": 2}
+    bot._connection._view_store.dispatch_view(2, custom_id, interaction)
+    return interaction
+
+
+def _dynamic_tasks():
+    return [t for t in asyncio.all_tasks() if t.get_name().startswith("discord-ui-dynamic-item")]
+
+
+async def test_restart_dispatch_routes_signup_custom_id(monkeypatch):
+    bot = create_bot()
+    bot.add_dynamic_items(SignupButton)
+    handler = AsyncMock()
+    monkeypatch.setattr(signup_service, "handle_signup_toggle", handler)
+
+    interaction = _dispatch(bot, "signup:42", _signup_message(42))
+    tasks = _dynamic_tasks()
+    assert len(tasks) == 1
+    await asyncio.gather(*tasks)
+
+    handler.assert_awaited_once_with(interaction, 42)
+
+
+@pytest.mark.parametrize("custom_id", ["signup:abc", "signup:-1", "signup:", "signup:" + "1" * 19,
+                                       "signup:12x", "xsignup:1"])
+async def test_restart_dispatch_rejects_malformed_custom_id(monkeypatch, custom_id):
+    bot = create_bot()
+    bot.add_dynamic_items(SignupButton)
+    handler = AsyncMock()
+    monkeypatch.setattr(signup_service, "handle_signup_toggle", handler)
+
+    _dispatch(bot, custom_id, _signup_message(1))
+    assert _dynamic_tasks() == []
+    await asyncio.sleep(0)
+    handler.assert_not_awaited()
+
+
+def test_template_accepts_18_digit_id_only():
+    pattern = SignupButton.__discord_ui_compiled_template__
+    assert pattern.fullmatch("signup:" + "9" * 18)
+    assert not pattern.fullmatch("signup:" + "9" * 19)
+    assert not pattern.fullmatch("signup:\u00b2")
+
+
+# ---- handler: double click and failure paths ----
+
+async def test_rapid_double_click_toggles_on_then_off(db, interaction):
+    event_id = _add_event(db)
+    await handle_signup_toggle(interaction, event_id)
+    await handle_signup_toggle(interaction, event_id)
+
+    edits = interaction.response.edit_message.call_args_list
+    assert [c.kwargs["view"].children[0].label for c in edits] == \
+        ["✅ Going (1)", "✅ Going (0)"]
+    with db() as s:
+        assert count_signups(s, event_id) == 0
+
+
+def _not_found_http():
+    return discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "Unknown Message")
+
+
+async def test_edit_failure_sends_note_and_keeps_row(db, interaction):
+    event_id = _add_event(db)
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.response.edit_message = AsyncMock(side_effect=_not_found_http())
+
+    await handle_signup_toggle(interaction, event_id)
+
+    args, kwargs = interaction.response.send_message.call_args
+    assert "signup was recorded" in args[0] and kwargs["ephemeral"] is True
+    interaction.followup.send.assert_not_awaited()
+    with db() as s:
+        assert count_signups(s, event_id) == 1
+
+
+async def test_edit_failure_note_uses_followup_when_response_done(db, interaction):
+    event_id = _add_event(db)
+    interaction.response.is_done = MagicMock(return_value=True)
+    interaction.response.edit_message = AsyncMock(
+        side_effect=discord.HTTPException(SimpleNamespace(status=500, reason="x"), "boom"))
+
+    await handle_signup_toggle(interaction, event_id)
+
+    interaction.response.send_message.assert_not_awaited()
+    assert "recorded" in interaction.followup.send.call_args.args[0]
+
+
+async def test_edit_and_note_both_failing_does_not_raise(db, interaction):
+    event_id = _add_event(db)
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.response.edit_message = AsyncMock(side_effect=_not_found_http())
+    interaction.response.send_message = AsyncMock(side_effect=_not_found_http())
+
+    await handle_signup_toggle(interaction, event_id)
+
+    with db() as s:
+        assert count_signups(s, event_id) == 1
+
+
+async def test_confirmation_followup_failure_does_not_raise(db, interaction):
+    event_id = _add_event(db)
+    interaction.followup.send = AsyncMock(side_effect=_not_found_http())
+
+    await handle_signup_toggle(interaction, event_id)
+
+    interaction.response.edit_message.assert_awaited_once()
+    with db() as s:
+        assert count_signups(s, event_id) == 1
+
+
+async def test_db_error_is_acknowledged_with_note(db, interaction, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+    event_id = _add_event(db)
+    interaction.response.is_done = MagicMock(return_value=False)
+
+    def boom(*a, **k):
+        raise OperationalError("stmt", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(signup_service, "toggle_signup", boom)
+    await handle_signup_toggle(interaction, event_id)
+
+    interaction.response.edit_message.assert_not_awaited()
+    args, kwargs = interaction.response.send_message.call_args
+    assert "try again" in args[0] and kwargs["ephemeral"] is True
+
+
+@pytest.mark.filterwarnings("ignore:DELETE statement")
+def test_toggle_remove_tolerates_row_deleted_concurrently(tmp_path):
+    from unittest import mock
+    url = f"sqlite:///{tmp_path / 'race.db'}"
+    engine = get_engine(url)
+    Base.metadata.create_all(engine)
+    factory = get_session_factory(url)
+    try:
+        with factory() as setup:
+            setup.add(Event(guild_id=GUILD, external_id="wp:1", title="T", url="https://x"))
+            setup.commit()
+            toggle_signup(setup, GUILD, 1, 100)
+        a, b = factory(), factory()
+        stale = a.execute(select(EventSignup)).scalar_one()
+        real_execute = a.execute
+
+        def execute(stmt, *args, **kwargs):
+            if not execute.called:
+                execute.called = True
+                b.delete(b.get(EventSignup, stale.id))  # concurrent remove wins
+                b.commit()
+                return SimpleNamespace(scalar_one_or_none=lambda: stale)
+            return real_execute(stmt, *args, **kwargs)
+
+        execute.called = False
+        with mock.patch.object(a, "execute", side_effect=execute):
+            assert toggle_signup(a, GUILD, 1, 100) == (False, 0)
+        a.close()
+        b.close()
+    finally:
+        engine.dispose()
+        factory.kw["bind"].dispose()
+
+
+@pytest.mark.parametrize("make_exc", [
+    lambda: StaleDataError("gone"),
+    lambda: ObjectDeletedError(SimpleNamespace(class_=EventSignup, obj=lambda: None)),
+])
+def test_toggle_remove_counts_stale_delete_as_removed(session, monkeypatch, make_exc):
+    exc = make_exc()
+    session.add(Event(guild_id=GUILD, external_id="wp:1", title="T", url="https://x"))
+    session.commit()
+    toggle_signup(session, GUILD, 1, 100)
+    real_commit = session.commit
+    calls = []
+
+    def commit():
+        if not calls:
+            calls.append(1)
+            raise exc
+        real_commit()
+
+    monkeypatch.setattr(session, "commit", commit)
+    added, count = toggle_signup(session, GUILD, 1, 100)
+    assert added is False and count == 1  # row still exists in this simulated failure
+    assert calls == [1]
+
+
+# ---- autocomplete ----
+
+async def test_autocomplete_truncates_to_100_chars(db, cog, interaction):
+    event_id = _add_event(db, title="X" * 150)
+    choices = await cog.signups_event_autocomplete(interaction, "")
+    assert len(choices) == 1 and len(choices[0].name) == 100
+    assert choices[0].value == str(event_id)
+
+
+async def test_autocomplete_is_case_insensitive(db, cog, interaction):
+    _add_event(db, title="Draft Night", ext="wp:1")
+    _add_event(db, title="Commander", ext="wp:2")
+    assert len(await cog.signups_event_autocomplete(interaction, "DrAfT")) == 1
+    assert len(await cog.signups_event_autocomplete(interaction, "  night ")) == 1
+
+
+async def test_autocomplete_orders_dated_ascending_then_undated(db, cog, interaction):
+    base = datetime(2026, 11, 1, 10, 0, tzinfo=TZ)
+    _add_event(db, title="Zed undated", ext="wp:1", starts_at=None)
+    _add_event(db, title="Late", ext="wp:2", starts_at=base + timedelta(days=3))
+    _add_event(db, title="Alpha undated", ext="wp:3", starts_at=None)
+    _add_event(db, title="Early", ext="wp:4", starts_at=base)
+    _add_event(db, title="Early B", ext="wp:5", starts_at=base)
+    choices = await cog.signups_event_autocomplete(interaction, "")
+    assert [c.name for c in choices] == [
+        "Early — Sun 01 Nov", "Early B — Sun 01 Nov", "Late — Wed 04 Nov",
+        "Alpha undated", "Zed undated"]
+
+
+async def test_autocomplete_other_guild_does_not_leak(db, cog, interaction):
+    _add_event(db, title="Mine", ext="wp:1")
+    interaction.guild_id = GUILD + 1
+    assert await cog.signups_event_autocomplete(interaction, "") == []
+
+
+# ---- /board signups ----
+
+async def test_signups_truncates_long_lists(db, cog, interaction):
+    event_id = _add_event(db)
+    with db() as s:
+        for uid in range(1, 151):
+            toggle_signup(s, GUILD, event_id, uid)
+    interaction.guild = _members({uid: SimpleNamespace(display_name="n" * 30)
+                                  for uid in range(1, 151)})
+    await cog.board_signups.callback(cog, interaction, str(event_id))
+    text = interaction.followup.send.call_args.args[0]
+    assert len(text) == commands_admin._MAX_MESSAGE_CHARS and text.endswith("…")
+
+
+async def test_signups_for_ended_event_still_listed(db, cog, interaction):
+    event_id = _add_event(db)
+    with db() as s:
+        toggle_signup(s, GUILD, event_id, 1)
+        s.get(Event, event_id).is_active = False
+        s.commit()
+    interaction.guild = _members({1: SimpleNamespace(display_name="Alice")})
+    await cog.board_signups.callback(cog, interaction, str(event_id))
+    assert "Alice" in interaction.followup.send.call_args.args[0]
+
+
+async def test_signups_name_falls_back_to_fetch_member(db, cog, interaction):
+    event_id = _add_event(db)
+    with db() as s:
+        toggle_signup(s, GUILD, event_id, 7)
+    interaction.guild = _members({}, fetched={7: SimpleNamespace(display_name="Fetched")})
+    await cog.board_signups.callback(cog, interaction, str(event_id))
+    interaction.guild.fetch_member.assert_awaited_once_with(7)
+    assert "Fetched" in interaction.followup.send.call_args.args[0]
+
+
+async def test_signups_cached_member_skips_fetch(db, cog, interaction):
+    event_id = _add_event(db)
+    with db() as s:
+        toggle_signup(s, GUILD, event_id, 7)
+    interaction.guild = _members({7: SimpleNamespace(display_name="Cached")})
+    await cog.board_signups.callback(cog, interaction, str(event_id))
+    interaction.guild.fetch_member.assert_not_awaited()
+
+
+async def test_signups_unresolvable_member_shows_user_id(db, cog, interaction):
+    event_id = _add_event(db)
+    with db() as s:
+        toggle_signup(s, GUILD, event_id, 7)
+        toggle_signup(s, GUILD, event_id, 8)
+    interaction.guild = _members({})
+    interaction.guild.fetch_member = AsyncMock(side_effect=[
+        _not_found(), discord.HTTPException(SimpleNamespace(status=500, reason="x"), "boom")])
+    await cog.board_signups.callback(cog, interaction, str(event_id))
+    text = interaction.followup.send.call_args.args[0]
+    assert "User 7" in text and "User 8" in text
+
+
+# ---- buttons only on event cards ----
+
+async def test_only_event_cards_carry_views(session):
+    session.add(GuildConfig(guild_id=GUILD, timezone="Australia/Perth", this_week_channel_id=111,
+                            week_start_mode="today_start", include_tba_section=True,
+                            weekly_image_url="https://x/img.png"))
+    base = datetime.now(TZ).replace(hour=12, minute=0) + timedelta(days=1)
+    for n in range(8):
+        session.add(Event(guild_id=GUILD, external_id=f"wp:{n}", title=f"Event {n}",
+                          url="https://x", starts_at=base + timedelta(minutes=n),
+                          time_known=True, is_active=True))
+    session.add(Event(guild_id=GUILD, external_id="wp:tba", title="Undated", url="https://x",
+                      is_active=True))
+    session.add(WeeklyRecurring(guild_id=GUILD, title="Door night", days_text="Mon",
+                                time_text="6:00 PM"))
+    session.commit()
+
+    channel = _Channel()
+    bot = _board_bot(channel)
+    await upsert_board(bot, session, GUILD, "this_week")
+
+    by_title = {s["embed"].title: s for s in channel.sends}
+    assert len(channel.sends) == 11
+    for title in ("This Week at Hightide", "Also this week", "Every week at Hightide",
+                  "Date TBA"):
+        assert "view" not in by_title[title]
+    assert sum(1 for s in channel.sends if "view" in s) == 7
+
+    cfg = session.get(GuildConfig, GUILD)
+    cfg.weekly_image_url = "https://x/other.png"
+    session.commit()
+    await upsert_board(bot, session, GUILD, "this_week")
+    edited = [e for m in channel.messages.values() for e in m.edits]
+    assert edited and all("view" not in e for e in edited)
+
+
+# ---- recreate path ----
+
+async def test_recreate_this_week_keeps_signup_counts(db, interaction):
+    with db() as s:
+        s.add(GuildConfig(guild_id=GUILD, timezone="Australia/Perth", this_week_channel_id=111,
+                          week_start_mode="today_start", include_tba_section=True))
+        s.commit()
+    first = _add_event(db, title="First", ext="wp:1")
+    second = _add_event(db, title="Second", ext="wp:2",
+                        starts_at=datetime.now(TZ) + timedelta(days=2))
+    with db() as s:
+        toggle_signup(s, GUILD, first, 1)
+        toggle_signup(s, GUILD, first, 2)
+        toggle_signup(s, GUILD, second, 3)
+
+    channel = _Channel()
+    cog = AdminCog(_board_bot(channel))
+    await cog.board_recreate.callback(cog, interaction, "this_week")
+
+    cards = {s["view"].children[0].custom_id: s["view"].children[0].label
+             for s in channel.sends if "view" in s}
+    assert cards == {f"signup:{first}": "✅ Going (2)", f"signup:{second}": "✅ Going (1)"}
+    assert "recreate failed" not in str(interaction.followup.send.call_args)
+
+
+# ---- model ----
+
+def test_event_ids_are_never_reused(session):
+    session.add(Event(guild_id=GUILD, external_id="wp:1", title="A", url="https://x"))
+    session.commit()
+    first_id = session.query(Event).one().id
+    session.delete(session.get(Event, first_id))
+    session.commit()
+    session.add(Event(guild_id=GUILD, external_id="wp:2", title="B", url="https://x"))
+    session.commit()
+    assert session.query(Event).one().id > first_id
