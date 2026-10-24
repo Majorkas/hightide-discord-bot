@@ -2,6 +2,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from src.db.models import Event
 from src.db.repositories import (
     mark_absent_events_stale, upsert_event,
 )
@@ -14,6 +15,7 @@ log = logging.getLogger("hightide.events")
 def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
                     source_url: str | None = None) -> dict:
     created = updated = unchanged = failed = filtered = 0
+    created_events: list[Event] = []
     seen: set[str] = set()
     for product in products:
         try:
@@ -35,7 +37,7 @@ def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
             }
             if source_url is not None:
                 data["source_url"] = source_url
-            _, was_created, changed = upsert_event(session, guild_id, data)
+            row, was_created, changed = upsert_event(session, guild_id, data)
         except (KeyError, TypeError, ValueError, AttributeError):
             pid = product.get("id") if isinstance(product, dict) else None
             log.exception("failed to process product id=%s", pid)
@@ -48,6 +50,7 @@ def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
         seen.add(ev.external_id)
         if was_created:
             created += 1
+            created_events.append(row)
         elif changed:
             updated += 1
         else:
@@ -60,6 +63,7 @@ def upsert_products(session: Session, guild_id: int, products: list[dict], tz,
         "filtered": filtered,
     }
     log.info("upsert complete: %s", stats)
+    stats["created_events"] = created_events
     return stats
 
 

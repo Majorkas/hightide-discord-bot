@@ -53,6 +53,16 @@ def _event_line(e: Event, tz, with_day: bool = False) -> str:
     return f"{day_part}`{time_part}` {_link(e.title, e.url)}{price_part}"
 
 
+def build_ping_message(event: Event, role_id: int, tz) -> str:
+    if event.starts_at is None:
+        day_part, time_part = "date TBC", "time TBC"
+    else:
+        local = event.starts_at.astimezone(tz)
+        day_part = local.strftime("%a %d %b")
+        time_part = local.strftime("%H:%M") if event.time_known else "time TBC"
+    return f"<@&{role_id}> — New event: {_link(event.title[:200], event.url)} · {day_part} · {time_part}"
+
+
 def _truncate_lines(lines: list[str], max_chars: int) -> tuple[str, int]:
     """Join lines within max_chars, appending '… +N more'; return (text, dropped)."""
     if len("\n".join(lines)) <= max_chars:

@@ -33,6 +33,14 @@ def test_upsert_all_fixture_events(session, fixture_products, tz):
     assert len(get_active_events(session, 1)) == _real_count(fixture_products)
 
 
+def test_created_events_lists_only_new_rows(session, fixture_products, tz):
+    first = upsert_products(session, 1, fixture_products, tz)
+    assert len(first["created_events"]) == first["created"] == _real_count(fixture_products)
+    assert all(isinstance(e, Event) and e.id for e in first["created_events"])
+    second = upsert_products(session, 1, fixture_products, tz)
+    assert second["created_events"] == []
+
+
 def test_junk_products_not_persisted(session, fixture_products, tz):
     upsert_products(session, 1, fixture_products, tz)
     titles = [e.title.lower() for e in session.query(Event).all()]

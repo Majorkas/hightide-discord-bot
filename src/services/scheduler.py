@@ -12,6 +12,7 @@ from src.db.repositories import get_or_create_config
 from src.db.session import get_session_factory
 from src.services.board_service import upsert_board
 from src.services.event_service import refresh_events
+from src.services.role_service import ping_new_events
 
 log = logging.getLogger("hightide.scheduler")
 
@@ -77,7 +78,19 @@ async def _run_daily_refresh_locked(bot, guild_id: int, *, fetch: bool) -> dict:
                 events = f"error:{type(e).__name__}"
         else:
             events = "cached"
+        created_events = []
+        if isinstance(events, dict):
+            # Keep ORM rows out of the result dict that gets logged and returned.
+            created_events = events.pop("created_events", [])
         result = {"events": events}
+        if created_events:
+            try:
+                result["pings"] = await ping_new_events(
+                    bot, session, guild_id, created_events, tz)
+            except Exception as e:
+                log.exception("event pings failed")
+                session.rollback()
+                result["pings"] = f"error:{type(e).__name__}"
         for board_type in ("this_week", "this_month"):
             try:
                 result[board_type] = await upsert_board(bot, session, guild_id, board_type)
