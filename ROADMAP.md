@@ -75,10 +75,10 @@ Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/sup
 - [x] Task 9: `/want` commands + alphabetical Scryfall-linked board + browse + daily expiry
 - [x] 4-agent council + fixes (channel-move cleanup, input rejection, host pinning, accent sort; 1366 tests green)
 
-## v2 Milestone 7 — New-product alerts ⬜
+## v2 Milestone 7 — New-product alerts ✅ (complete 2026-10-24)
 
-- [ ] Task 10: Watched-category alerts
-- [ ] 4-agent council + fixes
+- [x] Task 10: Watched-category alerts (per-slug seeding, real WC Store API prices, flood cap, poison-pill hardening)
+- [x] 4-agent council + fixes (1489 tests green)
 
 ## v2 Milestone 8 — Hardening + deploy ⬜
 
