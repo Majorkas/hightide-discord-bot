@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -58,6 +59,15 @@ def _chunk_embeds(embeds: list[discord.Embed]) -> list[list[discord.Embed]]:
 
 def _md_title(title: str) -> str:
     return discord.utils.escape_markdown(discord.utils.escape_mentions(title))
+
+
+_UNDATED_SORT = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _event_choice_label(event) -> str:
+    label = event.title if event.starts_at is None \
+        else f"{event.title} — {event.starts_at:%a %d %b}"
+    return label[:100]
 
 
 class AdminCog(commands.Cog):
@@ -348,9 +358,12 @@ class AdminCog(commands.Cog):
         needle = current.strip().lower()
         with _session() as session:
             events = get_active_events(session, interaction.guild_id)
-            matches = [(e.title, e.id) for e in events if needle in e.title.lower()]
-        return [app_commands.Choice(name=title[:100], value=str(event_id))
-                for title, event_id in matches[:25]]
+            matches = sorted(
+                (e for e in events if needle in e.title.lower()),
+                key=lambda e: (e.starts_at is None, e.starts_at or _UNDATED_SORT, e.title))
+            choices = [(_event_choice_label(e), e.id) for e in matches[:25]]
+        return [app_commands.Choice(name=label, value=str(event_id))
+                for label, event_id in choices]
 
     @board_group.command(name="signups", description="List who signed up for an event")
     @app_commands.autocomplete(event=signups_event_autocomplete)
@@ -360,7 +373,7 @@ class AdminCog(commands.Cog):
         from src.services.signup_service import list_signups
         with _session() as session:
             row = get_event_by_id(session, interaction.guild_id, int(event)) \
-                if event.isdigit() else None
+                if re.fullmatch(r"[0-9]{1,18}", event) else None
             if row is None:
                 await interaction.followup.send("Event not found.", ephemeral=True)
                 return
@@ -372,6 +385,11 @@ class AdminCog(commands.Cog):
         names = []
         for uid in user_ids:
             member = interaction.guild.get_member(uid)
+            if member is None:
+                try:
+                    member = await interaction.guild.fetch_member(uid)
+                except (discord.NotFound, discord.HTTPException):
+                    member = None
             names.append(discord.utils.escape_markdown(
                 discord.utils.escape_mentions(member.display_name)) if member else f"User {uid}")
         text = f"**{_md_title(title)}** — {len(names)} going\n" + "\n".join(f"• {n}" for n in names)

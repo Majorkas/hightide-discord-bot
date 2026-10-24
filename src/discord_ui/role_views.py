@@ -38,7 +38,7 @@ class RolesPanelView(discord.ui.View):
 
 
 class SignupButton(discord.ui.DynamicItem[discord.ui.Button],
-                   template=r"signup:(?P<event_id>[0-9]+)"):
+                   template=r"signup:(?P<event_id>[0-9]{1,18})"):
     """Going button; the event id lives in the custom_id so it survives restarts."""
 
     def __init__(self, event_id: int, count: int = 0):

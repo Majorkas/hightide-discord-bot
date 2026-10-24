@@ -81,7 +81,8 @@ class EventSource(Base):
 
 class Event(Base):
     __tablename__ = "events"
-    __table_args__ = (UniqueConstraint("guild_id", "external_id"),)
+    # AUTOINCREMENT stops rowid reuse from attaching stale signups/buttons to a different event.
+    __table_args__ = (UniqueConstraint("guild_id", "external_id"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     guild_id: Mapped[int] = mapped_column(BigInteger)
