@@ -5,8 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.db.models import Base, Event, GuildConfig
-from src.db.session import get_engine, get_session_factory
+from src.db.models import Event, GuildConfig
 from src.services import scheduler
 from src.services.scheduler import RefreshScheduler, _in_run_window, should_run_now
 
@@ -32,19 +31,6 @@ def test_should_run_now_at_configured_time():
 ])
 def test_in_run_window(hhmm, now, expected):
     assert _in_run_window(hhmm, now) is expected
-
-
-@pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    """Temp DB factory for scheduler tests; monkeypatches scheduler._session_factory."""
-    url = f"sqlite:///{tmp_path / 'test.db'}"
-    engine = get_engine(url)
-    Base.metadata.create_all(engine)
-    factory = get_session_factory(url)
-    monkeypatch.setattr(scheduler, "_session_factory", factory)
-    yield factory
-    engine.dispose()
-    factory.kw["bind"].dispose()
 
 
 def _seed(temp_db, **kw):
@@ -89,7 +75,7 @@ async def test_run_daily_refresh(temp_db, monkeypatch):
     bot = MagicMock()
     result = await scheduler.run_daily_refresh(bot, 999)
 
-    assert result == {"events": {"added": 2, "updated": 1},
+    assert result == {"events": {"added": 2, "updated": 1}, "pings": 0,
                       "this_week": "created", "this_month": "skipped"}
     assert mock_upsert.await_count == 2
     boards = [c.args[3] for c in mock_upsert.await_args_list]

@@ -48,3 +48,16 @@ def fixture_products() -> list[dict]:
 @pytest.fixture
 def tz() -> ZoneInfo:
     return ZoneInfo("Australia/Perth")
+
+
+@pytest.fixture
+def temp_db(tmp_path, monkeypatch):
+    """File-backed DB factory; monkeypatches scheduler._session_factory."""
+    url = f"sqlite:///{tmp_path / 'test.db'}"
+    engine = get_engine(url)
+    Base.metadata.create_all(engine)
+    factory = get_session_factory(url)
+    monkeypatch.setattr(scheduler, "_session_factory", factory)
+    yield factory
+    engine.dispose()
+    factory.kw["bind"].dispose()
