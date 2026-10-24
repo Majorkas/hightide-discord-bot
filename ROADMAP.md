@@ -58,11 +58,11 @@ Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/sup
 - [x] Task 4: "Today at Hightide" post + config
 - [x] 4-agent council + fixes (events-step gating, default time, boundary coverage; 724 tests green)
 
-## v2 Milestone 4 — Sign-ups ⬜
+## v2 Milestone 4 — Sign-ups ✅ (complete 2026-10-24)
 
-- [ ] Task 5: Signup table + service
-- [ ] Task 6: Signup buttons on week cards + admin list
-- [ ] 4-agent council + fixes
+- [x] Task 5: Signup table + service
+- [x] Task 6: Signup buttons on week cards + admin list (DynamicItem dispatch)
+- [x] 4-agent council + fixes (name resolution, id guards, restart dispatch; 790 tests green)
 
 ## v2 Milestone 5 — Deck + card ⬜
 
