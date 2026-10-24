@@ -1,5 +1,6 @@
 """Tests for /deck (Moxfield + Archidekt)."""
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -338,12 +339,13 @@ class TestRetryAndTimeout:
     async def test_image_lookup_uses_remaining_budget(self, mox, scry):
         p, client = _client(_resp(200, mox), _resp(200, scry))
         try:
-            await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}", retries=False, timeout=2.5)
+            with patch("src.services.deck_service._monotonic", side_effect=[0.0, 0.5]):
+                await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}", retries=False, timeout=2.5)
         finally:
             p.stop()
         deck_t = client.get.call_args_list[0][1]["timeout"]
         img_t = client.get.call_args_list[1][1]["timeout"]
-        assert deck_t == 2.5 and 0 < img_t <= 2.5
+        assert deck_t == 2.5 and img_t == 2.0
 
     async def test_image_lookup_skipped_when_budget_spent(self, mox):
         p, client = _client(_resp(200, mox))
@@ -516,3 +518,139 @@ class TestDeckCommandHandler:
         f.assert_not_called()
         args, kw = i.response.send_message.call_args
         assert "500" in args[0] and kw["ephemeral"] is True
+
+    async def test_deck_wait_for_timeout_reply(self):
+        """Test that /deck handler wraps fetch_deck in asyncio.wait_for and replies quickly."""
+        import asyncio
+        cog, i = self._cog(), _interaction()
+        async def hang(*args, **kwargs):
+            await asyncio.sleep(10)  # Simulate hanging fetch
+        with patch("src.discord_ui.commands_roles.fetch_deck", new_callable=AsyncMock) as f:
+            f.side_effect = hang
+            start = asyncio.get_event_loop().time()
+            await cog.deck_lookup.callback(cog, i, "https://moxfield.com/decks/abc")
+            elapsed = asyncio.get_event_loop().time() - start
+        # wait_for should cancel after ~2.6s, reply should be fast
+        assert elapsed < 3.0
+        args, kw = i.response.send_message.call_args
+        assert "too long" in args[0] and kw["ephemeral"] is True
+
+    async def test_deck_check_link_mentions_blocking(self):
+        """Test that deck=None reply mentions site may be blocking us."""
+        cog, i = self._cog(), _interaction()
+        with patch("src.discord_ui.commands_roles.fetch_deck", new_callable=AsyncMock) as f:
+            f.return_value = None
+            await cog.deck_lookup.callback(cog, i, "https://moxfield.com/decks/abc")
+        args, kw = i.response.send_message.call_args
+        assert "blocking us" in args[0] and kw["ephemeral"] is True
+
+
+class TestMoxfieldBlockLogging:
+    async def test_non_200_non_404_logs_warning(self, caplog):
+        """Test that Moxfield 403 logs a warning."""
+        p, _ = _client(_resp(403, {}))
+        try:
+            with caplog.at_level(logging.WARNING):
+                d = await fetch_deck("https://moxfield.com/decks/test123")
+        finally:
+            p.stop()
+        assert d is None
+        assert "returned 403" in caplog.text
+        assert "test123" in caplog.text
+
+    async def test_archidekt_non_200_does_not_log_warning(self, caplog):
+        """Test that Archidekt responses don't trigger extra logging."""
+        p, _ = _client(_resp(403, {}))
+        try:
+            with caplog.at_level(logging.WARNING):
+                d = await fetch_deck("https://archidekt.com/decks/1")
+        finally:
+            p.stop()
+        assert d is None
+        # Should not log for Archidekt
+
+
+class TestImageLookupRobustness:
+    async def test_scryfall_bad_json_gives_no_image(self, mox):
+        """Test that 200 with bad JSON from Scryfall doesn't raise."""
+        r = _resp(200, mox)
+        r_scry = _resp(200)
+        r_scry.json.side_effect = ValueError("bad json")
+        p, _ = _client(r, r_scry)
+        try:
+            d = await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}", retries=False)
+        finally:
+            p.stop()
+        assert d is not None
+        assert d.image_url is None
+        assert d.title == mox["name"]
+
+    async def test_scryfall_http_error_caught(self, mox):
+        """Test that httpx.HTTPError during image lookup is caught."""
+        p, _ = _client(side_effect=[_resp(200, mox), httpx.ConnectError("no net")])
+        try:
+            d = await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}", retries=False)
+        finally:
+            p.stop()
+        assert d is not None and d.image_url is None
+
+
+class TestMoxfieldUrlVariants:
+    async def test_moxfield_with_primer_segment(self):
+        """Test that Moxfield URLs with trailing segment like /primer work."""
+        result = parse_deck_url("https://moxfield.com/decks/oEWXWHM5eEGMmopExLWRCA/primer")
+        assert result == ("Moxfield", "oEWXWHM5eEGMmopExLWRCA")
+
+    async def test_moxfield_with_custom_segment(self):
+        """Test that Moxfield URLs with any trailing segment work."""
+        result = parse_deck_url("https://moxfield.com/decks/abc123/my-custom-slug")
+        assert result == ("Moxfield", "abc123")
+
+    async def test_moxfield_no_double_slash_in_segment(self):
+        """Test that only one optional trailing segment is accepted."""
+        # This should work: /decks/id/segment
+        result = parse_deck_url("https://moxfield.com/decks/abc123/primer")
+        assert result == ("Moxfield", "abc123")
+        # But /decks/id/seg1/seg2 should not work (too many segments)
+        result = parse_deck_url("https://moxfield.com/decks/abc123/primer/extra")
+        assert result is None
+
+
+class TestArchidektHttpsRequirement:
+    async def test_archidekt_https_image_accepted(self, arch):
+        """Test that HTTPS Archidekt image URLs are accepted."""
+        arch["customFeatured"] = "https://example.com/custom.png"
+        p, _ = _client(_resp(200, arch))
+        try:
+            d = await fetch_deck("https://archidekt.com/decks/1")
+        finally:
+            p.stop()
+        assert d.image_url == "https://example.com/custom.png"
+
+    async def test_archidekt_http_image_rejected(self, arch):
+        """Test that HTTP (non-HTTPS) image URLs are rejected."""
+        arch["customFeatured"] = "http://example.com/custom.png"
+        arch["featured"] = "http://bad.com/image.png"
+        p, _ = _client(_resp(200, arch))
+        try:
+            d = await fetch_deck("https://archidekt.com/decks/1")
+        finally:
+            p.stop()
+        assert d.image_url is None
+
+
+class TestImageLookupBudget:
+    async def test_image_lookup_uses_exact_remaining_budget(self, mox, scry):
+        """Test that image lookup gets exact remaining budget from monotonic clock."""
+        p, client = _client(_resp(200, mox), _resp(200, scry))
+        try:
+            # Patch monotonic to return specific values
+            with patch("src.services.deck_service._monotonic", side_effect=[0.0, 0.5]):
+                await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}", retries=False, timeout=2.5)
+        finally:
+            p.stop()
+        deck_t = client.get.call_args_list[0][1]["timeout"]
+        img_t = client.get.call_args_list[1][1]["timeout"]
+        assert deck_t == 2.5
+        # Remaining = 2.5 - (0.5 - 0.0) = 2.0
+        assert img_t == 2.0

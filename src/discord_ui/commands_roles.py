@@ -351,6 +351,7 @@ class RolesCog(commands.Cog):
     @app_commands.guild_only()
     async def card_lookup(self, interaction: discord.Interaction, name: str) -> None:
         """Look up a Magic card by name and display its details."""
+        import asyncio
         # Name length guard
         if len(name) > _MAX_CARD_NAME_LEN:
             await interaction.response.send_message(
@@ -359,9 +360,18 @@ class RolesCog(commands.Cog):
             )
             return
 
-        # Lookup with bounded timeout (2.5s) and retries disabled
+        # Lookup with bounded timeout (2.5s) and retries disabled, enforced with wait_for
         try:
-            card = await scryfall_card(name, retries=False, timeout=2.5)
+            card = await asyncio.wait_for(
+                scryfall_card(name, retries=False, timeout=2.5),
+                timeout=2.6
+            )
+        except asyncio.TimeoutError:
+            await interaction.response.send_message(
+                "Scryfall lookup is taking too long — try again shortly.",
+                ephemeral=True
+            )
+            return
         except httpx.TransportError as e:
             log.warning(f"Scryfall lookup transport error for '{name}': {e}")
             await interaction.response.send_message(
@@ -400,6 +410,7 @@ class RolesCog(commands.Cog):
     @app_commands.guild_only()
     async def deck_lookup(self, interaction: discord.Interaction, url: str) -> None:
         """Show a summary embed for a Moxfield or Archidekt deck link."""
+        import asyncio
         if len(url) > _MAX_DECK_URL_LEN:
             await interaction.response.send_message(
                 f"Deck link must be ≤{_MAX_DECK_URL_LEN} characters.",
@@ -408,7 +419,16 @@ class RolesCog(commands.Cog):
             return
 
         try:
-            deck = await fetch_deck(url, retries=False, timeout=2.5)
+            deck = await asyncio.wait_for(
+                fetch_deck(url, retries=False, timeout=2.5),
+                timeout=2.6
+            )
+        except asyncio.TimeoutError:
+            await interaction.response.send_message(
+                "Deck lookup is taking too long — try again shortly.",
+                ephemeral=True
+            )
+            return
         except Exception as e:
             parsed = parse_deck_url(url)
             site = parsed[0] if parsed else "The deck site"
@@ -421,7 +441,7 @@ class RolesCog(commands.Cog):
 
         if deck is None:
             await interaction.response.send_message(
-                "Couldn't read that deck — check the link.",
+                "Couldn't read that deck — check the link (or the site may be blocking us).",
                 ephemeral=True
             )
             return

@@ -243,7 +243,7 @@ class DeckSummary:
 
 _MOXFIELD_HOSTS = {"moxfield.com", "www.moxfield.com"}
 _ARCHIDEKT_HOSTS = {"archidekt.com", "www.archidekt.com"}
-_MOXFIELD_PATH = re.compile(r"^/decks/([A-Za-z0-9_-]{1,64})/?$")
+_MOXFIELD_PATH = re.compile(r"^/decks/([A-Za-z0-9_-]{1,64})(?:/[^/]*)?/?$")
 _ARCHIDEKT_PATH = re.compile(r"^/decks/(\d{1,12})(?:/[^/]*)?/?$")
 _MIN_IMAGE_BUDGET = 0.25
 
@@ -330,18 +330,21 @@ async def _moxfield_summary(data: dict, deck_id: str, started: float, *, retries
             card = await scryfall_card_by_id(sfid, retries=retries, timeout=remaining)
             if card:
                 image_url = _get_card_image_url(card)
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, ValueError, TypeError, KeyError) as e:
             log.warning("Scryfall image lookup failed for deck %s: %s", deck_id, e)
 
     title = data.get("name")
+    # Cap commander at 100 chars and format at 40 chars
+    capped_commander = (commander_name[:100] if commander_name else None)
+    capped_format = _moxfield_format(data.get("format"))[:40]
     return DeckSummary(
         title=title if isinstance(title, str) and title.strip() else "Untitled deck",
-        fmt=_moxfield_format(data.get("format")),
+        fmt=capped_format,
         card_count=_as_int(data.get("mainboardCount")) + _as_int(data.get("commandersCount")),
         image_url=image_url,
         url=_safe_url(f"https://moxfield.com/decks/{deck_id}") or "",
         source="Moxfield",
-        commander=commander_name,
+        commander=capped_commander,
     )
 
 
@@ -362,11 +365,17 @@ def _archidekt_summary(data: dict, deck_id: str) -> DeckSummary:
 
     image_url = None
     for key in ("customFeatured", "featured"):
-        image_url = _safe_url(data.get(key)) if isinstance(data.get(key), str) else None
-        if image_url:
-            break
+        raw_url = data.get(key)
+        if isinstance(raw_url, str):
+            # Require https for Archidekt image URLs
+            if raw_url.startswith("https://"):
+                image_url = _safe_url(raw_url)
+                if image_url:
+                    break
 
     title = data.get("name")
+    # Cap commander at 100 chars
+    capped_commander = (commander[:100] if commander else None)
     return DeckSummary(
         title=title if isinstance(title, str) and title.strip() else "Untitled deck",
         fmt=_ARCHIDEKT_FORMATS.get(data.get("deckFormat"), "Unknown"),
@@ -374,7 +383,7 @@ def _archidekt_summary(data: dict, deck_id: str) -> DeckSummary:
         image_url=image_url,
         url=_safe_url(f"https://archidekt.com/decks/{deck_id}") or "",
         source="Archidekt",
-        commander=commander,
+        commander=capped_commander,
     )
 
 
@@ -398,6 +407,11 @@ async def fetch_deck(url: str, *, retries: bool = True, timeout: float = 15.0) -
     started = _monotonic()
     async with httpx.AsyncClient() as client:
         resp = await _get_json_response(client, api, retries, timeout)
+    
+    # Log non-200 responses for Moxfield (except 404)
+    if source == "Moxfield" and resp.status_code != 200 and resp.status_code != 404:
+        log.warning("Moxfield API returned %d for deck %s", resp.status_code, deck_id)
+    
     if resp.status_code != 200:
         return None
     try:
