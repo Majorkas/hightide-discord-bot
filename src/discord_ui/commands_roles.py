@@ -19,7 +19,7 @@ from src.db.repositories import (
     list_interest_roles, remove_interest_role, remove_keyword,
 )
 from src.db.session import get_session_factory
-from src.discord_ui.embeds import _md_escape, build_wants_embed
+from src.discord_ui.embeds import _md_escape, _truncate_lines, build_wants_embed
 from src.discord_ui.role_views import (
     MAX_PANEL_ROLES, RolesPanelView, build_roles_panel_embed,
 )
@@ -494,6 +494,7 @@ class RolesCog(commands.Cog):
                     msg = f"Added to the wants board: {shown}."
                 except Exception:
                     log.exception("wants board update failed after add")
+                    session.rollback()
                     msg = (f"Saved your want {shown}, but I couldn't update the board — "
                            "check my permissions in the wants channel.")
             if want.scryfall_uri is None:
@@ -510,7 +511,8 @@ class RolesCog(commands.Cog):
             embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     @want_group.command(name="remove", description="Remove one of your wants (by id from /want list)")
-    async def want_remove(self, interaction: discord.Interaction, want_id: int) -> None:
+    async def want_remove(self, interaction: discord.Interaction,
+                          want_id: app_commands.Range[int, 1, 2**31 - 1]) -> None:
         await interaction.response.defer(ephemeral=True)
         is_admin = interaction.user.guild_permissions.manage_guild
         with _session() as session:
@@ -526,6 +528,7 @@ class RolesCog(commands.Cog):
                     await update_wants_board(self.bot, session, interaction.guild_id)
                 except Exception:
                     log.exception("wants board update failed after remove")
+                    session.rollback()
                     note = " I couldn't update the board — check my permissions."
         await interaction.followup.send(f"Removed want #{want_id}.{note}", ephemeral=True)
 
@@ -544,7 +547,5 @@ class RolesCog(commands.Cog):
             await interaction.response.send_message(
                 "You have no active wants. Add one with /want add.", ephemeral=True)
             return
-        text = "\n".join(lines)
-        if len(text) > _MAX_MESSAGE_CHARS:
-            text = text[:_MAX_MESSAGE_CHARS] + "\n…"
+        text, _ = _truncate_lines(lines, _MAX_MESSAGE_CHARS)  # whole lines only: no cut markdown
         await interaction.response.send_message(text, ephemeral=True)

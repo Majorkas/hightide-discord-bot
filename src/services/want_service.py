@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import logging
+import re
+from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -10,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from src.db.models import CardWant
 from src.db.repositories import get_board_post, get_or_create_config, save_board_post
-from src.discord_ui.embeds import _safe_url, build_wants_embed
+from src.discord_ui.embeds import _safe_url, build_wants_embed, want_sort_key
 from src.services.board_service import _get_board_lock
 from src.services.deck_service import scryfall_card_exact
 
@@ -23,6 +25,9 @@ EXPIRY_DAYS = 30
 DEFAULT_RESOLVE_TIMEOUT = 2.6  # wait_for cap; the HTTP timeout sits just below it
 _HTTP_TIMEOUT_MARGIN = 0.1
 BOARD_TYPE = "wants"
+_SCRYFALL_HOST = "scryfall.com"
+# Zero-width/bidi controls and markdown chars that can make a name render as nothing.
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069*_`~|]")
 
 
 class WantLimitError(ValueError):
@@ -50,7 +55,15 @@ async def _resolve_uri(card_name: str, timeout: float) -> str | None:
         log.warning("wants: scryfall resolve failed for %r: %r", card_name, exc)
         return None
     uri = card.get("scryfall_uri") if isinstance(card, dict) else None
-    return uri if isinstance(uri, str) and _safe_url(uri) else None
+    if not isinstance(uri, str) or not _safe_url(uri):
+        return None
+    try:
+        host = (urlparse(uri).hostname or "").lower()
+    except ValueError:
+        return None
+    if host != _SCRYFALL_HOST and not host.endswith("." + _SCRYFALL_HOST):
+        return None
+    return uri
 
 
 async def add_want(session: Session, guild_id: int, user_id: int, card_name: str,
@@ -62,6 +75,10 @@ async def add_want(session: Session, guild_id: int, user_id: int, card_name: str
     note = (note or "").strip() or None
     if not card_name:
         raise ValueError("Give me a card name.")
+    if not _INVISIBLE.sub("", card_name).strip():
+        raise ValueError("That card name has nothing visible in it — give me a real card name.")
+    if "://" in card_name or (note is not None and "://" in note):
+        raise ValueError("Links aren't allowed in card names/notes.")
     if len(card_name) > MAX_CARD_NAME_LEN:
         raise ValueError(f"Card name must be at most {MAX_CARD_NAME_LEN} characters.")
     if note is not None and len(note) > MAX_NOTE_LEN:
@@ -116,7 +133,7 @@ def list_wants(session: Session, guild_id: int, user_id: int | None = None, *,
     stmt = select(CardWant).where(CardWant.guild_id == guild_id, CardWant.active.is_(True))
     if user_id is not None:
         stmt = stmt.where(CardWant.user_id == user_id)
-    return sorted(session.execute(stmt).scalars(), key=lambda w: (w.card_name.casefold(), w.id))
+    return sorted(session.execute(stmt).scalars(), key=want_sort_key)
 
 
 async def update_wants_board(bot, session: Session, guild_id: int, *,
@@ -137,6 +154,7 @@ async def _update_wants_board_locked(bot, session: Session, guild_id: int,
 
     channel = bot.get_channel(cfg.wants_channel_id) or await bot.fetch_channel(cfg.wants_channel_id)
     post = get_board_post(session, guild_id, BOARD_TYPE)
+    moved_from = (post.channel_id, post.message_id) if post and post.channel_id != channel.id else None
     msg = None
     if post and post.channel_id == channel.id:
         try:
@@ -165,4 +183,17 @@ async def _update_wants_board_locked(bot, session: Session, guild_id: int,
         except Exception:
             log.exception("cleanup of unsaved wants board message failed")
         raise
+    if moved_from is not None:
+        await _delete_old_board_message(bot, *moved_from)
     return "created"
+
+
+async def _delete_old_board_message(bot, channel_id: int, message_id: int) -> None:
+    """Best-effort removal of the board left behind in the previous wants channel."""
+    try:
+        old_channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        old_msg = await old_channel.fetch_message(message_id)
+        if old_msg.author.id == bot.user.id:
+            await old_msg.delete()
+    except discord.HTTPException:  # NotFound/Forbidden included
+        log.info("could not delete old wants board message %s in %s", message_id, channel_id)

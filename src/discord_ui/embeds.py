@@ -1,4 +1,5 @@
 import re
+import unicodedata
 from collections import defaultdict
 from datetime import date, datetime
 from urllib.parse import urlparse
@@ -214,9 +215,20 @@ def _want_line(w: CardWant, tz) -> str:
     return " · ".join(parts)
 
 
+# NFKD leaves these unchanged, so ascii-folding would drop them and misfile e.g. "Ætherize".
+_LIGATURES = str.maketrans({"Æ": "AE", "æ": "ae", "Œ": "OE", "œ": "oe",
+                            "Ø": "O", "ø": "o", "ß": "ss"})
+
+
+def want_sort_key(w: CardWant) -> tuple[str, int]:
+    """Accent-folded, case-insensitive name order with an id tiebreak."""
+    name = unicodedata.normalize("NFKD", w.card_name.translate(_LIGATURES))
+    return name.encode("ascii", "ignore").decode().casefold(), w.id or 0
+
+
 def build_wants_embed(wants: list[CardWant], tz) -> discord.Embed:
-    """Wants board / browse embed: alphabetical (case-insensitive), capped, user text escaped."""
-    ordered = sorted(wants, key=lambda w: (w.card_name.casefold(), w.id or 0))
+    """Wants board / browse embed: alphabetical (accent/case-insensitive), capped, user text escaped."""
+    ordered = sorted(wants, key=want_sort_key)
     if not ordered:
         return discord.Embed(title="Card Wants", description="No active wants.", color=_COLOR)
     kept: list[str] = []

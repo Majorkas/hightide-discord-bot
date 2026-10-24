@@ -21,6 +21,9 @@ log = logging.getLogger("hightide.scheduler")
 
 _RETRY_INTERVAL = timedelta(minutes=30)
 _MAX_RETRY_DELAY = timedelta(hours=2)
+# Result keys of auxiliary steps whose errors must not drive retry backoff;
+# every new auxiliary step MUST be added here.
+_NON_DRIVING_KEYS = ("pings", "wants", "tonight")
 
 # Created lazily; tests can monkeypatch or reset to None.
 _session_factory = None
@@ -186,7 +189,7 @@ class RefreshScheduler:
             result = await run_daily_refresh(self.bot, cfg.guild_id, fetch=fetch)
             has_error = any(
                 isinstance(v, str) and v.startswith("error:")
-                for k, v in result.items() if k not in ("pings", "wants", "tonight")
+                for k, v in result.items() if k not in _NON_DRIVING_KEYS
             )
             if isinstance(result.get("events"), dict):
                 self._events_done_key[guild_id] = today
