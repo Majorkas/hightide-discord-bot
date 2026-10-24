@@ -60,6 +60,7 @@ def ensure_guild_config_v2_columns(engine) -> None:
         ("wants_channel_id", "BIGINT"),
         ("new_stock_channel_id", "BIGINT"),
         ("new_stock_cat_slugs", "VARCHAR NOT NULL DEFAULT 'pre-orders'"),
+        ("new_stock_terms", "VARCHAR NOT NULL DEFAULT 'preorder,pre-order'"),
     ]
     for col_name, col_type in columns:
         try:
@@ -70,6 +71,16 @@ def ensure_guild_config_v2_columns(engine) -> None:
                 raise
             continue
         log.info("added guild_config v2 column")
+    # One-time: an admin who customised category slugs keeps a watch by migrating it to a term.
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE guild_config SET new_stock_terms = new_stock_cat_slugs "
+                "WHERE new_stock_cat_slugs IS NOT NULL "
+                "AND new_stock_cat_slugs <> 'pre-orders' "
+                "AND new_stock_terms = 'preorder,pre-order'"))
+    except OperationalError:
+        pass  # old column absent on fresh DBs
 
 
 def get_session_factory(url: str) -> sessionmaker:

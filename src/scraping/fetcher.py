@@ -102,6 +102,77 @@ def fetch_category_products(base_url: str, cat_slug: str,
         return _fetch_all(own, base_url, cat_slug)
 
 
+def _fetch_search(client: httpx.Client, base_url: str, term: str) -> list[dict]:
+    products: list[dict] = []
+    page = 1
+    while True:
+        resp = _get(
+            client,
+            f"{base_url}/wp-json/wp/v2/product",
+            search=term, per_page=100, page=page, _embed="1",
+        )
+        batch = resp.json()
+        if not isinstance(batch, list):
+            raise FetchError("unexpected product search response shape")
+        products.extend(batch)
+        try:
+            total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
+        except ValueError:
+            total_pages = 1
+        total_pages = min(total_pages, MAX_PAGES)
+        if page >= total_pages or len(products) >= MAX_PRODUCTS:
+            break
+        page += 1
+    if len(products) > MAX_PRODUCTS:
+        products = products[:MAX_PRODUCTS]
+    log.info("fetched %d products matching %r", len(products), term)
+    return products
+
+
+def fetch_products_by_search(base_url: str, term: str,
+                             client: httpx.Client | None = None) -> list[dict]:
+    """Fetch products whose title/content matches a WP search term, across all pages."""
+    base_url = base_url.rstrip("/")
+    if urlparse(base_url).scheme != "https":
+        raise FetchError("base_url must use https")
+    if client is not None:
+        return _fetch_search(client, base_url, term)
+    with httpx.Client() as own:
+        return _fetch_search(own, base_url, term)
+
+
+def _fetch_store_search(client: httpx.Client, base_url: str, term: str) -> list[dict]:
+    products: list[dict] = []
+    page = 1
+    while True:
+        resp = _get(client, f"{base_url}/wp-json/wc/store/v1/products",
+                    search=term, per_page=100, page=page)
+        batch = resp.json()
+        if not isinstance(batch, list):
+            raise FetchError("unexpected store product search response shape")
+        products.extend(batch)
+        try:
+            total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
+        except ValueError:
+            total_pages = 1
+        if page >= min(total_pages, MAX_PAGES) or len(products) >= MAX_PRODUCTS:
+            break
+        page += 1
+    return products[:MAX_PRODUCTS]
+
+
+def fetch_store_products_by_search(base_url: str, term: str,
+                                   client: httpx.Client | None = None) -> list[dict]:
+    """Fetch WooCommerce Store API products (with prices) matching a search term."""
+    base_url = base_url.rstrip("/")
+    if urlparse(base_url).scheme != "https":
+        raise FetchError("base_url must use https")
+    if client is not None:
+        return _fetch_store_search(client, base_url, term)
+    with httpx.Client() as own:
+        return _fetch_store_search(own, base_url, term)
+
+
 def _fetch_store_all(client: httpx.Client, base_url: str, cat_id: int) -> list[dict]:
     products: list[dict] = []
     page = 1
