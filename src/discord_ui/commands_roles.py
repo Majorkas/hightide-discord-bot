@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -33,6 +34,7 @@ _MAX_KEYWORD_LEN = 100
 _MAX_MESSAGE_CHARS = 1900
 _MAX_CARD_NAME_LEN = 100
 _MAX_DECK_URL_LEN = 500
+_LOOKUP_TIMEOUT = 2.6
 _PANEL_GONE_NOTE = " The panel message is gone — run /roles setup to post it again."
 _PANEL_FORBIDDEN_NOTE = (" I couldn't update the panel (missing permission to view or edit "
                          "it) — check my channel permissions.")
@@ -351,7 +353,6 @@ class RolesCog(commands.Cog):
     @app_commands.guild_only()
     async def card_lookup(self, interaction: discord.Interaction, name: str) -> None:
         """Look up a Magic card by name and display its details."""
-        import asyncio
         # Name length guard
         if len(name) > _MAX_CARD_NAME_LEN:
             await interaction.response.send_message(
@@ -364,7 +365,7 @@ class RolesCog(commands.Cog):
         try:
             card = await asyncio.wait_for(
                 scryfall_card(name, retries=False, timeout=2.5),
-                timeout=2.6
+                timeout=_LOOKUP_TIMEOUT
             )
         except asyncio.TimeoutError:
             await interaction.response.send_message(
@@ -410,7 +411,6 @@ class RolesCog(commands.Cog):
     @app_commands.guild_only()
     async def deck_lookup(self, interaction: discord.Interaction, url: str) -> None:
         """Show a summary embed for a Moxfield or Archidekt deck link."""
-        import asyncio
         if len(url) > _MAX_DECK_URL_LEN:
             await interaction.response.send_message(
                 f"Deck link must be ≤{_MAX_DECK_URL_LEN} characters.",
@@ -421,7 +421,7 @@ class RolesCog(commands.Cog):
         try:
             deck = await asyncio.wait_for(
                 fetch_deck(url, retries=False, timeout=2.5),
-                timeout=2.6
+                timeout=_LOOKUP_TIMEOUT
             )
         except asyncio.TimeoutError:
             await interaction.response.send_message(

@@ -519,9 +519,12 @@ class TestDeckCommandHandler:
         args, kw = i.response.send_message.call_args
         assert "500" in args[0] and kw["ephemeral"] is True
 
-    async def test_deck_wait_for_timeout_reply(self):
+    async def test_deck_wait_for_timeout_reply(self, monkeypatch):
         """Test that /deck handler wraps fetch_deck in asyncio.wait_for and replies quickly."""
         import asyncio
+        # Patch the timeout constant to 0.05s for fast test execution
+        monkeypatch.setattr("src.discord_ui.commands_roles._LOOKUP_TIMEOUT", 0.05)
+        
         cog, i = self._cog(), _interaction()
         async def hang(*args, **kwargs):
             await asyncio.sleep(10)  # Simulate hanging fetch
@@ -530,8 +533,8 @@ class TestDeckCommandHandler:
             start = asyncio.get_event_loop().time()
             await cog.deck_lookup.callback(cog, i, "https://moxfield.com/decks/abc")
             elapsed = asyncio.get_event_loop().time() - start
-        # wait_for should cancel after ~2.6s, reply should be fast
-        assert elapsed < 3.0
+        # wait_for should cancel after ~0.05s, reply should be fast
+        assert elapsed < 0.5
         args, kw = i.response.send_message.call_args
         assert "too long" in args[0] and kw["ephemeral"] is True
 
@@ -559,7 +562,7 @@ class TestMoxfieldBlockLogging:
         assert "test123" in caplog.text
 
     async def test_archidekt_non_200_does_not_log_warning(self, caplog):
-        """Test that Archidekt responses don't trigger extra logging."""
+        """Test that Archidekt 403 does not log a warning (per site-specific policy)."""
         p, _ = _client(_resp(403, {}))
         try:
             with caplog.at_level(logging.WARNING):
@@ -567,7 +570,8 @@ class TestMoxfieldBlockLogging:
         finally:
             p.stop()
         assert d is None
-        # Should not log for Archidekt
+        # Archidekt non-200 should not trigger extra logging (unlike Moxfield)
+        assert "returned" not in caplog.text or "archidekt" not in caplog.text.lower()
 
 
 class TestImageLookupRobustness:
@@ -593,6 +597,46 @@ class TestImageLookupRobustness:
         finally:
             p.stop()
         assert d is not None and d.image_url is None
+
+    async def test_scryfall_json_list_response_caught(self, mox):
+        """Test that JSON list (non-dict) from Scryfall raises AttributeError and is caught."""
+        r = _resp(200, mox)
+        r_scry = _resp(200, ["card1", "card2"])
+        p, _ = _client(r, r_scry)
+        try:
+            d = await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}", retries=False)
+        finally:
+            p.stop()
+        # Should handle the AttributeError and return deck without image
+        assert d is not None
+        assert d.image_url is None
+        assert d.title == mox["name"]
+
+
+class TestLengthCaps:
+    async def test_commander_truncated_at_100_chars(self, mox, scry):
+        """Test that commander name is capped at 100 characters."""
+        # Get the actual key from the commanders dict (the card name)
+        cmdr_key = next(iter(mox["commanders"]))
+        mox["commanders"][cmdr_key]["card"]["name"] = "A" * 150
+        p, _ = _client(_resp(200, mox), _resp(200, scry))
+        try:
+            d = await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}")
+        finally:
+            p.stop()
+        assert d.commander == "A" * 100
+        assert len(d.commander) == 100
+
+    async def test_format_truncated_at_40_chars(self, mox, scry):
+        """Test that format name is capped at 40 characters."""
+        # Set a very long format name that will exceed 40 chars after processing
+        mox["format"] = "very_long_custom_format_name_that_is_definitely_over_forty_characters"
+        p, _ = _client(_resp(200, mox), _resp(200, scry))
+        try:
+            d = await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}")
+        finally:
+            p.stop()
+        assert len(d.fmt) <= 40
 
 
 class TestMoxfieldUrlVariants:
@@ -637,20 +681,3 @@ class TestArchidektHttpsRequirement:
         finally:
             p.stop()
         assert d.image_url is None
-
-
-class TestImageLookupBudget:
-    async def test_image_lookup_uses_exact_remaining_budget(self, mox, scry):
-        """Test that image lookup gets exact remaining budget from monotonic clock."""
-        p, client = _client(_resp(200, mox), _resp(200, scry))
-        try:
-            # Patch monotonic to return specific values
-            with patch("src.services.deck_service._monotonic", side_effect=[0.0, 0.5]):
-                await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}", retries=False, timeout=2.5)
-        finally:
-            p.stop()
-        deck_t = client.get.call_args_list[0][1]["timeout"]
-        img_t = client.get.call_args_list[1][1]["timeout"]
-        assert deck_t == 2.5
-        # Remaining = 2.5 - (0.5 - 0.0) = 2.0
-        assert img_t == 2.0

@@ -654,3 +654,32 @@ class TestCardCommandHandler:
             
             # Response should always be called
             assert mock_interaction.response.send_message.called, "Interaction should always be acknowledged"
+
+    @pytest.mark.asyncio
+    async def test_card_wait_for_timeout_reply(self, monkeypatch):
+        """Test that /card handler wraps scryfall_card in asyncio.wait_for and replies quickly."""
+        import asyncio
+        from src.discord_ui.commands_roles import RolesCog
+        
+        # Patch the timeout constant to 0.05s for fast test execution
+        monkeypatch.setattr("src.discord_ui.commands_roles._LOOKUP_TIMEOUT", 0.05)
+        
+        mock_interaction = AsyncMock(spec=discord.Interaction)
+        mock_interaction.response = AsyncMock()
+        
+        cog = RolesCog(AsyncMock())
+        
+        async def hang(*args, **kwargs):
+            await asyncio.sleep(10)  # Simulate hanging lookup
+        
+        with patch("src.discord_ui.commands_roles.scryfall_card", new_callable=AsyncMock) as f:
+            f.side_effect = hang
+            start = asyncio.get_event_loop().time()
+            callback = cog.card_lookup.callback
+            await callback(cog, mock_interaction, "Lightning Bolt")
+            elapsed = asyncio.get_event_loop().time() - start
+        
+        # wait_for should cancel after ~0.05s, reply should be fast
+        assert elapsed < 0.5
+        args, kw = mock_interaction.response.send_message.call_args
+        assert "too long" in args[0] and kw["ephemeral"] is True

@@ -330,7 +330,7 @@ async def _moxfield_summary(data: dict, deck_id: str, started: float, *, retries
             card = await scryfall_card_by_id(sfid, retries=retries, timeout=remaining)
             if card:
                 image_url = _get_card_image_url(card)
-        except (httpx.HTTPError, ValueError, TypeError, KeyError) as e:
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as e:
             log.warning("Scryfall image lookup failed for deck %s: %s", deck_id, e)
 
     title = data.get("name")
@@ -407,11 +407,11 @@ async def fetch_deck(url: str, *, retries: bool = True, timeout: float = 15.0) -
     started = _monotonic()
     async with httpx.AsyncClient() as client:
         resp = await _get_json_response(client, api, retries, timeout)
-    
+
     # Log non-200 responses for Moxfield (except 404)
     if source == "Moxfield" and resp.status_code != 200 and resp.status_code != 404:
         log.warning("Moxfield API returned %d for deck %s", resp.status_code, deck_id)
-    
+
     if resp.status_code != 200:
         return None
     try:
