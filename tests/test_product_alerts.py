@@ -5,7 +5,9 @@ import discord
 import httpx
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
+from src.db import repositories
 from src.db.models import Base, GuildConfig, ProductAlert
 from src.db.session import get_engine, get_session_factory
 from src.discord_ui import commands_admin
@@ -660,6 +662,7 @@ async def test_config_new_stock_channel(admin_db):
     await cog.set_new_stock_channel.callback(cog, i, channel)
     with admin_db() as s:
         assert s.get(GuildConfig, GUILD).new_stock_channel_id == 4242
+    assert i.response.send_message.call_args.args[0] == "new-stock channel set to <#4242>"
     assert i.response.send_message.call_args.kwargs["ephemeral"] is True
 
 
@@ -669,6 +672,7 @@ async def test_config_new_stock_categories_saves_normalised(admin_db):
     await cog.set_new_stock_categories.callback(cog, i, "Pre-Orders, sealed")
     with admin_db() as s:
         assert s.get(GuildConfig, GUILD).new_stock_cat_slugs == "pre-orders,sealed"
+    assert i.response.send_message.call_args.args[0] == "watching categories: pre-orders, sealed"
     assert i.response.send_message.call_args.kwargs["ephemeral"] is True
 
 
@@ -677,9 +681,21 @@ async def test_config_new_stock_categories_rejects_invalid_without_saving(admin_
     i = _interaction()
     await cog.set_new_stock_categories.callback(cog, i, "bad slug!")
     with admin_db() as s:
-        cfg = s.get(GuildConfig, GUILD)
-        assert cfg is None or cfg.new_stock_cat_slugs == "pre-orders"
-    assert "Invalid" in i.response.send_message.call_args.args[0]
+        assert s.get(GuildConfig, GUILD) is None  # nothing created on rejection
+    assert i.response.send_message.call_args.args[0].startswith("Invalid categories.")
+    assert i.response.send_message.call_args.kwargs["ephemeral"] is True
+
+
+async def test_config_new_stock_categories_invalid_keeps_existing_value(admin_db):
+    with admin_db() as s:
+        s.add(GuildConfig(guild_id=GUILD, new_stock_cat_slugs="sealed"))
+        s.commit()
+    cog = AdminCog(MagicMock())
+    i = _interaction()
+    await cog.set_new_stock_categories.callback(cog, i, "bad slug!")
+    with admin_db() as s:
+        assert s.get(GuildConfig, GUILD).new_stock_cat_slugs == "sealed"
+    assert i.response.send_message.call_args.args[0].startswith("Invalid categories.")
 
 
 def test_new_guild_config_defaults(session):
@@ -720,3 +736,328 @@ def test_ensure_v2_columns_adds_new_stock_columns(tmp_path):
         assert tuple(row) == (None, "pre-orders")
     finally:
         engine.dispose()
+
+
+# --- council batch: scheduler gate + real wiring ---
+
+async def test_scheduler_skips_product_step_when_fetch_false(sched_db, monkeypatch):
+    _seed_cfg(sched_db, new_stock_channel_id=CHANNEL_ID)
+    check = MagicMock()
+    monkeypatch.setattr("src.services.scheduler.check_new_products", check)
+    result = await scheduler.run_daily_refresh(MagicMock(), GUILD, fetch=False)
+    check.assert_not_called()
+    assert "products" not in result
+
+
+async def test_scheduler_real_check_to_post_wiring(sched_db, patch_fetch, monkeypatch):
+    _seed_cfg(sched_db, new_stock_channel_id=CHANNEL_ID)
+    monkeypatch.setattr("src.services.scheduler.upsert_board", AsyncMock(return_value="created"))
+    check = MagicMock(wraps=product_service.check_new_products)
+    post = AsyncMock(wraps=product_service.post_product_alerts)
+    monkeypatch.setattr("src.services.scheduler.check_new_products", check)
+    monkeypatch.setattr("src.services.scheduler.post_product_alerts", post)
+    ch = _channel()
+    bot = _bot(ch)
+
+    patch_fetch["catalog"]["pre-orders"] = [_product(1)]
+    assert (await scheduler.run_daily_refresh(bot, GUILD))["products"] == 0  # silent seed
+    ch.send.assert_not_awaited()
+
+    patch_fetch["catalog"]["pre-orders"] = [_product(1), _product(2, "New Set")]
+    patch_fetch["store"] = [_store(2, "2500")]
+    result = await scheduler.run_daily_refresh(bot, GUILD)
+
+    assert check.call_args.args[2] == "https://hightidetabletop.com.au"
+    assert check.call_args.args[3] == ZoneInfo("Australia/Perth")
+    assert {r.url.host for r in patch_fetch["requests"]} == {"hightidetabletop.com.au"}
+    handed = post.await_args.args[3]
+    assert [(p["external_id"], p["price"]) for p in handed] == [("wp:2", "$25.00")]
+    assert result["products"] == 1
+    assert ch.send.await_args.kwargs["embed"].description == (
+        "[New Set](https://shop.example.com/product/p2/) · $25.00")
+
+
+# --- council batch: precedence + store fallback matrix ---
+
+def _armed(db, patch_fetch, catalog=None):
+    """Seed the default slug, then return so the next check sees `catalog` as new."""
+    patch_fetch["catalog"]["pre-orders"] = []
+    check_new_products(db, GUILD, BASE, TZ)
+    if catalog is not None:
+        patch_fetch["catalog"]["pre-orders"] = catalog
+
+
+def test_store_price_wins_over_content_price(db, patch_fetch):
+    _armed(db, patch_fetch, [_product(1, content="<p>→ Ticket: $25.00</p>")])
+    patch_fetch["store"] = [_store(1, "1500")]
+    assert [p["price"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["$15.00"]
+
+
+def test_store_httpx_error_falls_back(db, patch_fetch):
+    _armed(db, patch_fetch, [_product(1, content="<p>→ Ticket: $25.00</p>")])
+    patch_fetch["store"] = httpx.ConnectError("down")
+    assert [p["price"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["$25.00"]
+
+
+def test_store_category_resolution_failure_falls_back(db, patch_fetch, monkeypatch):
+    _armed(db, patch_fetch, [_product(1, content="<p>→ Ticket: $25.00</p>")])
+    patch_fetch["store"] = [_store(1, "1500")]
+
+    def boom(*a, **k):
+        raise FetchError("category not found")
+
+    monkeypatch.setattr(product_service, "resolve_category_id", boom)
+    got = check_new_products(db, GUILD, BASE, TZ)
+    assert [p["price"] for p in got] == ["$25.00"]
+    assert patch_fetch["store_calls"] == []
+
+
+def test_store_partial_failure_across_slugs(db, patch_fetch, monkeypatch):
+    _set_slugs(db, "pre-orders,sealed")
+    patch_fetch["catalog"] = {"pre-orders": [], "sealed": []}
+    check_new_products(db, GUILD, BASE, TZ)
+    patch_fetch["catalog"] = {"pre-orders": [_product(3, content="<p>→ Ticket: $9.00</p>")],
+                              "sealed": [_product(4)]}
+
+    def fake_store(base_url, cat_id, client=None):
+        if cat_id == 100:  # pre-orders
+            raise FetchError("boom")
+        return [_store(4, "2500")]
+
+    monkeypatch.setattr(product_service, "fetch_store_products", fake_store)
+    got = {p["external_id"]: p["price"] for p in check_new_products(db, GUILD, BASE, TZ)}
+    assert got == {"wp:3": "$9.00", "wp:4": "$25.00"}
+
+
+def test_seeded_slug_transient_fetch_failure_is_silent(db, patch_fetch, monkeypatch):
+    _armed(db, patch_fetch, [_product(1)])
+    before = {r.external_id for r in db.execute(select(ProductAlert)).scalars()}
+
+    def down(base_url, slug, client=None):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(product_service, "fetch_category_products", down)
+    assert check_new_products(db, GUILD, BASE, TZ) == []
+    assert {r.external_id for r in db.execute(select(ProductAlert)).scalars()} == before
+
+
+@pytest.mark.parametrize("exc", [ValueError("bad json"), KeyError("id"), TypeError("shape")])
+def test_malformed_slug_response_aborts_only_that_slug(db, patch_fetch, monkeypatch, exc):
+    _set_slugs(db, "pre-orders,sealed")
+    patch_fetch["catalog"] = {"pre-orders": [], "sealed": []}
+    check_new_products(db, GUILD, BASE, TZ)
+    real = product_service.fetch_category_products
+
+    def flaky(base_url, slug, client=None):
+        if slug == "sealed":
+            raise exc
+        return real(base_url, slug, client)
+
+    patch_fetch["catalog"]["pre-orders"] = [_product(8)]
+    monkeypatch.setattr(product_service, "fetch_category_products", flaky)
+    assert [p["external_id"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["wp:8"]
+
+
+def test_malformed_unseeded_slug_response_does_not_raise_when_another_slug_ok(
+        db, patch_fetch, monkeypatch):
+    _set_slugs(db, "pre-orders,sealed")
+    patch_fetch["catalog"] = {"pre-orders": [_product(1)], "sealed": []}
+    real = product_service.fetch_category_products
+
+    def flaky(base_url, slug, client=None):
+        if slug == "sealed":
+            raise KeyError("id")
+        return real(base_url, slug, client)
+
+    monkeypatch.setattr(product_service, "fetch_category_products", flaky)
+    assert check_new_products(db, GUILD, BASE, TZ) == []
+    assert _markers(db) == {"seeded:pre-orders"}
+
+
+# --- council batch: price formatter edges ---
+
+@pytest.mark.parametrize("prices,expected", [
+    ({"price": "\u0661\u0662\u0663"}, None),  # Arabic-Indic digits
+    ({"price": "\uff11\uff12\uff13"}, None),  # fullwidth digits
+    ({"price": "1" * 13}, None),
+    ({"price": "1" * 12, "currency_prefix": "$"}, "$1,111,111,111.11"),
+    ({"price": "1500", "currency_minor_unit": -1}, None),
+    ({"price": "1500", "currency_minor_unit": 5}, None),
+    ({"price": "15000", "currency_minor_unit": 4, "currency_prefix": "$"}, "$1.5000"),
+    ({"price": "1500", "currency_prefix": 5, "currency_suffix": ["x"]}, "15.00"),
+    ({"price": "1500", "currency_prefix": "A" * 20, "currency_suffix": "B" * 20},
+     "A" * 8 + "15.00" + "B" * 8),
+])
+def test_format_store_price_edges(prices, expected):
+    assert product_service.format_store_price(prices) == expected
+
+
+# --- council batch: store fetcher caps ---
+
+def test_fetch_store_products_caps_pages():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json=[{"id": page}], headers={"X-WP-TotalPages": "500"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        got = fetcher.fetch_store_products(BASE, 7, client=c)
+    assert len(seen) == fetcher.MAX_PAGES
+    assert len(got) == fetcher.MAX_PAGES
+
+
+def test_fetch_store_products_truncates_to_max_products(monkeypatch):
+    monkeypatch.setattr(fetcher, "MAX_PRODUCTS", 150)
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=[{"id": i} for i in range(100)],
+                              headers={"X-WP-TotalPages": "5"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        got = fetcher.fetch_store_products(BASE, 7, client=c)
+    assert len(got) == 150
+    assert len(seen) == 2
+
+
+# --- council batch: record_product_alerts ---
+
+def test_record_product_alerts_idempotent(session):
+    repositories.record_product_alerts(session, GUILD, ["wp:1", "wp:2"])
+    repositories.record_product_alerts(session, GUILD, ["wp:2", "wp:1"])
+    rows = session.execute(select(ProductAlert)).scalars().all()
+    assert sorted(r.external_id for r in rows) == ["wp:1", "wp:2"]
+
+
+def test_record_product_alerts_integrity_error_rolls_back(session, monkeypatch):
+    repositories.record_product_alerts(session, GUILD, ["wp:1"])
+    # Simulate a concurrent writer: the pre-check misses the existing row.
+    monkeypatch.setattr(repositories, "get_alerted_product_ids", lambda s, g: set())
+    repositories.record_product_alerts(session, GUILD, ["wp:1", "wp:2"])  # must not raise
+    monkeypatch.undo()
+    assert repositories.get_alerted_product_ids(session, GUILD) == {"wp:1"}
+    repositories.record_product_alerts(session, GUILD, ["wp:3"])  # session still usable
+    assert repositories.get_alerted_product_ids(session, GUILD) == {"wp:1", "wp:3"}
+
+
+# --- council batch: _to_alert caps + validation ---
+
+def test_to_alert_truncates_title_url_price():
+    alert = product_service._to_alert(_product(
+        1, title="T" * 300, link="https://shop.example.com/" + "a" * 600,
+        content="<p>→ Ticket: $" + "9" * 100 + "</p>"))
+    assert len(alert["title"]) == product_service.MAX_TITLE_CHARS
+    assert len(alert["url"]) == product_service.MAX_URL_CHARS
+    assert len(alert["price"]) == product_service.MAX_PRICE_CHARS
+
+
+def test_to_alert_int_id_ok_and_string_id_rejected():
+    assert product_service._to_alert(_product(5))["external_id"] == "wp:5"
+    assert product_service._to_alert(_product("5")) is None
+
+
+@pytest.mark.parametrize("bad_id", [True, False, 5.0, None])
+def test_to_alert_rejects_non_int_ids(bad_id):
+    assert product_service._to_alert(_product(bad_id)) is None
+
+
+@pytest.mark.parametrize("bad_link", [["https://x.example.com"], {"u": 1}, 5, None])
+def test_to_alert_rejects_non_string_link(bad_link):
+    p = _product(1)
+    p["link"] = bad_link
+    assert product_service._to_alert(p) is None
+
+
+@pytest.mark.parametrize("bad_src", [["https://i.example.com/a.jpg"], {"u": 1}, 5,
+                                     "https://i.example.com/" + "a" * 5000],
+                         ids=["list", "dict", "int", "5000-chars"])
+def test_to_alert_drops_bad_image_but_keeps_product(bad_src):
+    p = _product(1)
+    p["_embedded"] = {"wp:featuredmedia": [{"source_url": bad_src}]}
+    alert = product_service._to_alert(p)
+    assert alert is not None and alert["image_url"] is None
+
+
+def test_to_alert_image_length_boundary():
+    prefix = "https://i.example.com/"
+    ok, too_long = prefix + "a" * (2000 - len(prefix)), prefix + "a" * (2001 - len(prefix))
+    for src, expected in ((ok, ok), (too_long, None), (None, None)):
+        p = _product(1)
+        p["_embedded"] = {"wp:featuredmedia": [{"source_url": src}]}
+        assert product_service._to_alert(p)["image_url"] == expected
+
+
+def test_malformed_product_on_first_run_alerts_once_fixed(db, patch_fetch):
+    bad = _product(2)
+    bad["link"] = ["nope"]
+    patch_fetch["catalog"]["pre-orders"] = [_product(1), bad]
+    assert check_new_products(db, GUILD, BASE, TZ) == []
+    assert _alerted(db) == {"wp:1"}  # malformed product is not swallowed by the seed
+    patch_fetch["catalog"]["pre-orders"] = [_product(1), _product(2, "Fixed")]
+    assert [p["external_id"] for p in check_new_products(db, GUILD, BASE, TZ)] == ["wp:2"]
+
+
+def test_poison_products_mid_list_do_not_block_later_ones(db, patch_fetch):
+    _armed(db, patch_fetch)
+    list_link, bool_id, str_id = _product(2), _product(True), _product("4")
+    list_link["link"] = ["x"]
+    patch_fetch["catalog"]["pre-orders"] = [_product(1), list_link, bool_id, str_id, _product(5)]
+    assert [p["external_id"] for p in check_new_products(db, GUILD, BASE, TZ)] == [
+        "wp:1", "wp:5"]
+
+
+# --- council batch: alert cap + poison-pill sends ---
+
+async def test_alert_cap_posts_ten_plus_digest_and_leaves_overflow_unrecorded(db, patch_fetch):
+    _armed(db, patch_fetch, [_product(i) for i in range(1, 13)])
+    ch = _channel()
+    todo = check_new_products(db, GUILD, BASE, TZ)
+    assert len(todo) == 12
+    assert await post_product_alerts(_bot(ch), db, GUILD, todo) == 10
+    assert ch.send.await_count == 11
+    digest = ch.send.await_args_list[-1]
+    assert digest.args == ("\u2795 2 more new products \u2014 check the shop.",)
+    am = digest.kwargs["allowed_mentions"]
+    assert am.everyone is False and am.users is False and am.roles is False
+    assert _alerted(db) == {f"wp:{i}" for i in range(1, 11)}
+    # next run drains the rest
+    nxt = check_new_products(db, GUILD, BASE, TZ)
+    assert [p["external_id"] for p in nxt] == ["wp:11", "wp:12"]
+    ch2 = _channel()
+    assert await post_product_alerts(_bot(ch2), db, GUILD, nxt) == 2
+    assert ch2.send.await_count == 2  # no digest when nothing overflows
+
+
+async def test_exactly_cap_posts_no_digest(db):
+    ch = _channel()
+    n = await post_product_alerts(_bot(ch), db, GUILD, [_prod(i) for i in range(10)])
+    assert n == 10 and ch.send.await_count == 10
+
+
+async def test_digest_failure_is_swallowed(db):
+    ch = _channel()
+    ch.send.side_effect = [None] * 10 + [discord.HTTPException(MagicMock(status=500), "x")]
+    n = await post_product_alerts(_bot(ch), db, GUILD, [_prod(i) for i in range(11)])
+    assert n == 10
+    assert len(_alerted(db)) == 10
+
+
+async def test_non_http_send_error_is_recorded_and_does_not_block_later(db):
+    ch = _channel()
+    ch.send.side_effect = [None, ValueError("poison"), None]
+    n = await post_product_alerts(_bot(ch), db, GUILD, [_prod(1), _prod(2), _prod(3)])
+    assert n == 2
+    assert _alerted(db) == {"wp:1", "wp:2", "wp:3"}
+
+
+async def test_unrenderable_product_is_recorded_and_does_not_block_later(db):
+    ch = _channel()
+    broken = _prod(2)
+    broken["title"] = None  # embed build raises TypeError
+    n = await post_product_alerts(_bot(ch), db, GUILD, [_prod(1), broken, _prod(3)])
+    assert n == 2
+    assert ch.send.await_count == 2
+    assert _alerted(db) == {"wp:1", "wp:2", "wp:3"}

@@ -498,6 +498,24 @@ async def test_tick_wants_error_does_not_drive_backoff(temp_db, monkeypatch, clo
     assert inst._next_attempt.get(999) is None
 
 
+async def test_tick_products_step_raising_does_not_drive_backoff(temp_db, monkeypatch, clock):
+    """A raising products step flows through the real run_daily_refresh and stays non-driving."""
+    monkeypatch.setattr("src.services.scheduler.config.GUILD_ID", 999)
+    _seed(temp_db, daily_refresh_time="09:00", new_stock_channel_id=555)
+    monkeypatch.setattr("src.services.scheduler.refresh_events",
+                        MagicMock(return_value={"added": 0}))
+    monkeypatch.setattr("src.services.scheduler.upsert_board",
+                        AsyncMock(return_value="created"))
+    monkeypatch.setattr("src.services.scheduler.check_new_products",
+                        MagicMock(side_effect=ConnectionError("net")))
+
+    inst = RefreshScheduler(_bot())
+    await inst.tick.coro(inst)
+
+    assert inst._last_run_key[999] == "2026-10-23"
+    assert inst._next_attempt.get(999) is None
+
+
 # --- fetch-once-per-day + bounded backoff ---
 
 def _fetch_flags(mock_refresh):
