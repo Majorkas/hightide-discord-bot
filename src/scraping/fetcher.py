@@ -102,107 +102,85 @@ def fetch_category_products(base_url: str, cat_slug: str,
         return _fetch_all(own, base_url, cat_slug)
 
 
-def _fetch_search(client: httpx.Client, base_url: str, term: str) -> list[dict]:
-    products: list[dict] = []
-    page = 1
-    while True:
-        resp = _get(
-            client,
-            f"{base_url}/wp-json/wp/v2/product",
-            search=term, per_page=100, page=page, _embed="1",
-        )
-        batch = resp.json()
-        if not isinstance(batch, list):
-            raise FetchError("unexpected product search response shape")
-        products.extend(batch)
-        try:
-            total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
-        except ValueError:
-            total_pages = 1
-        total_pages = min(total_pages, MAX_PAGES)
-        if page >= total_pages or len(products) >= MAX_PRODUCTS:
-            break
-        page += 1
-    if len(products) > MAX_PRODUCTS:
-        products = products[:MAX_PRODUCTS]
-    log.info("fetched %d products matching %r", len(products), term)
-    return products
-
-
-def fetch_products_by_search(base_url: str, term: str,
-                             client: httpx.Client | None = None) -> list[dict]:
-    """Fetch products whose title/content matches a WP search term, across all pages."""
+def fetch_latest_products(base_url: str,
+                          client: httpx.Client | None = None) -> list[dict]:
+    """Fetch the newest 100 products (the shop's New In ordering); single page."""
     base_url = base_url.rstrip("/")
     if urlparse(base_url).scheme != "https":
         raise FetchError("base_url must use https")
-    if client is not None:
-        return _fetch_search(client, base_url, term)
-    with httpx.Client() as own:
-        return _fetch_search(own, base_url, term)
 
-
-def _fetch_store_search(client: httpx.Client, base_url: str, term: str) -> list[dict]:
-    products: list[dict] = []
-    page = 1
-    while True:
-        resp = _get(client, f"{base_url}/wp-json/wc/store/v1/products",
-                    search=term, per_page=100, page=page)
+    def _latest(c: httpx.Client) -> list[dict]:
+        resp = _get(c, f"{base_url}/wp-json/wp/v2/product",
+                    orderby="date", order="desc", per_page=100, page=1, _embed="1")
         batch = resp.json()
         if not isinstance(batch, list):
-            raise FetchError("unexpected store product search response shape")
-        products.extend(batch)
-        try:
-            total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
-        except ValueError:
-            total_pages = 1
-        if page >= min(total_pages, MAX_PAGES) or len(products) >= MAX_PRODUCTS:
-            break
-        page += 1
-    return products[:MAX_PRODUCTS]
+            raise FetchError("unexpected latest-products response shape")
+        log.info("fetched %d latest products", len(batch))
+        return batch[:MAX_PRODUCTS]
+
+    if client is not None:
+        return _latest(client)
+    with httpx.Client() as own:
+        return _latest(own)
 
 
-def fetch_store_products_by_search(base_url: str, term: str,
-                                   client: httpx.Client | None = None) -> list[dict]:
-    """Fetch WooCommerce Store API products (with prices) matching a search term."""
+def fetch_event_category_ids(base_url: str,
+                             client: httpx.Client | None = None) -> set[int]:
+    """Ids of product categories whose slug is 'events' or ends with '-events'."""
     base_url = base_url.rstrip("/")
     if urlparse(base_url).scheme != "https":
         raise FetchError("base_url must use https")
+
+    def _cats(c: httpx.Client) -> set[int]:
+        ids: set[int] = set()
+        page = 1
+        while True:
+            resp = _get(c, f"{base_url}/wp-json/wp/v2/product_cat", per_page=100, page=page)
+            batch = resp.json()
+            if not isinstance(batch, list):
+                raise FetchError("unexpected category response shape")
+            for cat in batch:
+                if not isinstance(cat, dict):
+                    continue
+                slug, cid = cat.get("slug"), cat.get("id")
+                if (isinstance(slug, str) and isinstance(cid, int)
+                        and not isinstance(cid, bool)
+                        and (slug == "events" or slug.endswith("-events"))):
+                    ids.add(cid)
+            try:
+                total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
+            except ValueError:
+                total_pages = 1
+            if page >= min(total_pages, MAX_PAGES):
+                break
+            page += 1
+        return ids
+
     if client is not None:
-        return _fetch_store_search(client, base_url, term)
+        return _cats(client)
     with httpx.Client() as own:
-        return _fetch_store_search(own, base_url, term)
+        return _cats(own)
 
 
-def _fetch_store_all(client: httpx.Client, base_url: str, cat_id: int) -> list[dict]:
-    products: list[dict] = []
-    page = 1
-    while True:
-        resp = _get(client, f"{base_url}/wp-json/wc/store/v1/products",
-                    category=cat_id, per_page=100, page=page)
-        batch = resp.json()
-        if not isinstance(batch, list):
-            raise FetchError("unexpected store product response shape")
-        products.extend(batch)
-        try:
-            total_pages = int(resp.headers.get("X-WP-TotalPages", "1"))
-        except ValueError:
-            total_pages = 1
-        if page >= min(total_pages, MAX_PAGES) or len(products) >= MAX_PRODUCTS:
-            break
-        page += 1
-    return products[:MAX_PRODUCTS]
-
-
-def fetch_store_products(base_url: str, cat_id: int,
-                         client: httpx.Client | None = None) -> list[dict]:
-    """Fetch WooCommerce Store API products (with prices) for a category id."""
+def fetch_store_products_latest(base_url: str,
+                                client: httpx.Client | None = None) -> list[dict]:
+    """Fetch the newest 100 WooCommerce Store API products (with prices); single page."""
     base_url = base_url.rstrip("/")
     if urlparse(base_url).scheme != "https":
         raise FetchError("base_url must use https")
+
+    def _latest(c: httpx.Client) -> list[dict]:
+        resp = _get(c, f"{base_url}/wp-json/wc/store/v1/products",
+                    orderby="date", order="desc", per_page=100, page=1)
+        batch = resp.json()
+        if not isinstance(batch, list):
+            raise FetchError("unexpected store latest-products response shape")
+        return batch[:MAX_PRODUCTS]
+
     if client is not None:
-        return _fetch_store_all(client, base_url, cat_id)
+        return _latest(client)
     with httpx.Client() as own:
-        return _fetch_store_all(own, base_url, cat_id)
+        return _latest(own)
 
 
 def fetch_events(base_url: str, client: httpx.Client | None = None) -> list[dict]:

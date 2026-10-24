@@ -1,5 +1,4 @@
 import logging
-import re
 from decimal import Decimal
 
 import discord
@@ -11,52 +10,23 @@ from src.db.repositories import (
 )
 from src.discord_ui.embeds import _link, _md_escape, _safe_url
 from src.scraping.fetcher import (
-    FetchError, fetch_products_by_search, fetch_store_products_by_search,
+    FetchError, fetch_event_category_ids, fetch_latest_products, fetch_store_products_latest,
 )
 from src.scraping.hightide_parser import (
     MAX_PRICE_CHARS, MAX_TITLE_CHARS, MAX_URL_CHARS, _image_url,
 )
-from src.scraping.normalize import clean_title, extract_price
+from src.scraping.normalize import clean_title, extract_price, is_junk_title
 from src.services.role_service import _resolve_channel
 
 log = logging.getLogger("hightide.products")
 
-MAX_TERMS = 10
-MAX_TERM_LEN = 50
-_TERM_RE = re.compile(r"^[\w][\w .&+'-]*\Z", re.UNICODE)
 # Global marker (seeded even when no products matched); can't collide with "wp:N" ids.
-_SEED_MARKER = "seeded"
+# Suffixed for this watch model so pre-existing DBs re-seed once instead of flooding.
+_SEED_MARKER = "seeded:new-in"
 _MAX_MINOR_UNIT = 4
 _MAX_AFFIX_CHARS = 8
 MAX_ALERTS_PER_RUN = 10
 _MAX_IMAGE_URL_CHARS = 2000
-
-
-def parse_search_terms(raw: str) -> list[str]:
-    """Normalise a comma-separated search-term list; raises ValueError when invalid."""
-    terms: list[str] = []
-    for part in raw.split(","):
-        term = part.strip().lower()
-        if not term:
-            continue
-        if len(term) > MAX_TERM_LEN or not _TERM_RE.match(term):
-            raise ValueError(f"invalid search term: {term[:MAX_TERM_LEN]!r}")
-        if term not in terms:
-            terms.append(term)
-    if not terms:
-        raise ValueError("no search terms given")
-    if len(terms) > MAX_TERMS:
-        raise ValueError(f"at most {MAX_TERMS} search terms")
-    return terms
-
-
-def _title_matches(product: dict, terms: list[str]) -> bool:
-    """True when the product title contains any search term (title-only matching)."""
-    title = product.get("title", {}).get("rendered", "")
-    if not isinstance(title, str):
-        return False
-    title = title.lower()
-    return any(term in title for term in terms)
 
 
 def _to_alert(product: dict) -> dict | None:
@@ -103,62 +73,69 @@ def format_store_price(prices) -> str | None:
     return f"{prefix}{amount:,.{minor}f}{suffix}"
 
 
-def _store_prices(base_url: str, terms: list[str]) -> dict[str, str]:
+def _store_prices(base_url: str) -> dict[str, str]:
     """wp:{id} -> formatted price from the Store API; failures degrade to no entries."""
+    try:
+        store = fetch_store_products_latest(base_url)
+    except (FetchError, httpx.HTTPError, ValueError, KeyError, TypeError) as e:
+        log.warning("store price fetch failed: %s", e)
+        return {}
     prices: dict[str, str] = {}
-    for term in terms:
-        try:
-            store = fetch_store_products_by_search(base_url, term)
-        except (FetchError, httpx.HTTPError, ValueError, KeyError, TypeError) as e:
-            log.warning("store price fetch for %r failed: %s", term, e)
+    for sp in store:
+        if not isinstance(sp, dict):
             continue
-        for sp in store:
-            if not isinstance(sp, dict):
-                continue
-            price = format_store_price(sp.get("prices"))
-            if price and sp.get("id") is not None:
-                prices.setdefault(f"wp:{sp['id']}", price)
+        price = format_store_price(sp.get("prices"))
+        if price and sp.get("id") is not None:
+            prices.setdefault(f"wp:{sp['id']}", price)
     return prices
 
 
 def check_new_products(session: Session, guild_id: int, base_url: str, tz) -> list[dict]:
-    """New products whose title matches a watched search term; seeds silently on first run."""
+    """Newly added shop products (New In), minus event tickets; seeds silently on first run."""
     cfg = get_or_create_config(session, guild_id)
     if not cfg.new_stock_channel_id:
         return []
-    terms = parse_search_terms(cfg.new_stock_terms or "preorder,pre-order")
     alerted = get_alerted_product_ids(session, guild_id)
     seeded = _SEED_MARKER in alerted
 
-    # Union + dedupe every term's hits, keeping only title matches (search also
-    # matches descriptions, which we deliberately ignore to avoid noise).
+    try:
+        event_cats = fetch_event_category_ids(base_url)
+        products = fetch_latest_products(base_url)
+    except (FetchError, httpx.HTTPError, ValueError, KeyError, TypeError) as e:
+        # Without the category list event tickets can't be excluded; never risk posting those.
+        if not seeded:
+            raise FetchError(f"cannot seed; product fetch failed: {e}") from e
+        log.warning("latest-products fetch failed (seeded run, skipping): %s", e)
+        return []
+    if not event_cats:
+        log.warning("no event categories found; event tickets will not be excluded")
+
     found: dict[str, dict] = {}
-    failures = 0
-    for term in terms:
-        try:
-            products = fetch_products_by_search(base_url, term)
-        except (FetchError, httpx.HTTPError, ValueError, KeyError, TypeError) as e:
-            log.warning("product search for %r failed: %s", term, e)
-            failures += 1
+    for product in products:
+        if not isinstance(product, dict):
             continue
-        for product in products:
-            if not _title_matches(product, terms):
-                continue
-            alert = _to_alert(product)
-            if alert is not None:
-                found.setdefault(alert["external_id"], alert)
+        cats = product.get("product_cat")
+        if isinstance(cats, list) and any(
+                isinstance(c, int) and not isinstance(c, bool) and c in event_cats
+                for c in cats):
+            continue  # event tickets are covered by the boards
+        title = product.get("title", {})
+        title = title.get("rendered", "") if isinstance(title, dict) else ""
+        if isinstance(title, str) and is_junk_title(title):
+            continue
+        alert = _to_alert(product)
+        if alert is not None:
+            found.setdefault(alert["external_id"], alert)
 
     if not seeded:
-        if failures == len(terms):
-            raise FetchError(f"cannot seed; all {failures} search terms failed")
-        # First run: record everything currently matching without alerting.
+        # First run: record everything currently in the shop without alerting.
         record_product_alerts(session, guild_id, [*found, _SEED_MARKER])
         log.info("seeded %d products for guild %s", len(found), guild_id)
         return []
 
     pending = {xid: a for xid, a in found.items() if xid not in alerted}
     if pending:
-        store_prices = _store_prices(base_url, terms)
+        store_prices = _store_prices(base_url)
         for xid, alert in pending.items():
             price = store_prices.get(xid) or alert["price"]
             alert["price"] = price[:MAX_PRICE_CHARS] if price else None

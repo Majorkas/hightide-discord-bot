@@ -56,9 +56,6 @@ class GuildConfig(Base):
     last_daily_post_date: Mapped[str | None] = mapped_column(String, nullable=True)
     wants_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     new_stock_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # Comma-separated search terms matched against product titles for new-product alerts.
-    new_stock_terms: Mapped[str] = mapped_column(
-        String, default="preorder,pre-order", server_default="preorder,pre-order")
 
 
 class WeeklyRecurring(Base):

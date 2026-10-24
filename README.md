@@ -17,7 +17,7 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
 - **Sign-ups**: Every week-board event card has a Going button with a live count; admins list names with `/board signups`
 - **Card and deck lookup**: `/card` shows a Scryfall card; `/deck` shows a Moxfield or Archidekt deck summary
 - **Wants board**: Members track cards they're looking for with `/want`; a persistent board in the wants channel, entries expire after 30 days
-- **Product alerts**: New products whose title matches watched search terms (e.g. `preorder`) post once each to the new-stock channel (the watch seeds silently the first time it runs)
+- **Product alerts**: Products newly added to the shop (its New In page) post once each to the new-stock channel; event tickets are excluded (the boards cover those). The watch seeds silently the first time it runs
 
 ## Setup
 
@@ -137,9 +137,6 @@ The `/config`, `/source`, `/board` and `/roles` groups require the **Manage Guil
 
 **`/config new_stock_channel <#channel>`**
 - Channel for new-product alerts.
-
-**`/config new_stock_terms <terms>`**
-- Comma-separated title search terms that trigger new-product alerts (up to 10, e.g. `preorder, pre-order`).
 
 **`/config weekly_list`**
 - Lists recurring weekly events (including disabled ones) with their IDs.

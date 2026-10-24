@@ -13,7 +13,6 @@ from src import config
 from src.db.models import EventSource, WeeklyRecurring
 from src.db.repositories import get_or_create_config
 from src.db.session import get_session_factory
-from src.services.product_service import parse_search_terms
 from src.services.weekly_service import get_weekly_rows, seed_weekly_recurring
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -174,26 +173,6 @@ class AdminCog(commands.Cog):
             session.commit()
         await interaction.response.send_message(
             f"new-stock channel set to {channel.mention}", ephemeral=True)
-
-    @config_group.command(
-        name="new_stock_terms",
-        description="Title search terms that trigger new-product alerts (comma-separated)")
-    async def set_new_stock_terms(self, interaction: discord.Interaction,
-                                  terms: str) -> None:
-        try:
-            parsed = parse_search_terms(terms)
-        except ValueError:
-            await interaction.response.send_message(
-                "Invalid terms. Use up to 10 comma-separated terms "
-                "(letters, digits, spaces, .&+'-; max 50 chars each), e.g. preorder, pre-order.",
-                ephemeral=True)
-            return
-        with _session() as session:
-            cfg = get_or_create_config(session, interaction.guild_id)
-            cfg.new_stock_terms = ",".join(parsed)
-            session.commit()
-        await interaction.response.send_message(
-            f"watching product titles for: {', '.join(parsed)}", ephemeral=True)
 
     @config_group.command(
         name="daily_post_time",
