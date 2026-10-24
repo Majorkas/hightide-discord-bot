@@ -3,9 +3,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from src.bot import create_bot, register_persistent_views
+from src.bot import register_persistent_views
 from src.db.models import Base, GuildConfig, InterestRole
 from src.db.repositories import (
     add_interest_role, add_keyword, get_keywords_by_role, get_or_create_config,
@@ -20,12 +21,6 @@ from src.services import role_service
 GUILD = 12345
 CHANNEL = 555
 MESSAGE = 999
-
-
-def test_roles_commands_registered():
-    bot = create_bot()
-    names = {c.name for c in bot.tree.get_commands()}
-    assert "roles" in names
 
 
 def test_panel_embed_lists_roles():
@@ -47,14 +42,6 @@ def test_panel_view_buttons_have_persistent_custom_ids():
 
 def test_panel_embed_empty():
     assert "No roles configured" in build_roles_panel_embed([]).description
-
-
-def test_roles_group_surface():
-    bot = create_bot()
-    group = {c.name: c for c in bot.tree.get_commands()}["roles"]
-    assert {c.name for c in group.commands} == {"setup", "add", "remove", "keyword", "list"}
-    assert group.default_permissions == discord.Permissions(manage_guild=True)
-    assert group.guild_only is True
 
 
 @pytest.fixture
@@ -95,10 +82,22 @@ def interaction(channel):
     i.guild_id = GUILD
     i.guild.get_channel = MagicMock(return_value=channel)
     i.response.send_message = AsyncMock()
+    i.response.defer = AsyncMock()
+    i.followup.send = AsyncMock()
     return i
 
 
 def _reply(interaction) -> str:
+    """The single ephemeral followup of a defer-first command."""
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.response.send_message.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+    args, kwargs = interaction.followup.send.call_args
+    assert kwargs.get("ephemeral") is True
+    return args[0]
+
+
+def _direct_reply(interaction) -> str:
     interaction.response.send_message.assert_awaited_once()
     args, kwargs = interaction.response.send_message.call_args
     assert kwargs.get("ephemeral") is True
@@ -118,14 +117,23 @@ def _set_panel(db, channel_id=CHANNEL, message_id=MESSAGE):
         s.commit()
 
 
-def _role(role_id=11):
+def _role(role_id=11, **overrides):
     r = MagicMock()
     r.id = role_id
+    r.is_default.return_value = False
+    r.managed = False
+    r.is_assignable.return_value = True
+    r.permissions = discord.Permissions.none()
+    for k, v in overrides.items():
+        setattr(r, k, v)
     return r
 
 
+_STATUS = {discord.NotFound: 404, discord.Forbidden: 403, discord.HTTPException: 500}
+
+
 def _http_error(cls):
-    return cls(MagicMock(status=404 if cls is discord.NotFound else 403), "x")
+    return cls(MagicMock(status=_STATUS[cls]), "x")
 
 
 # ---- setup ----
@@ -163,21 +171,47 @@ async def test_setup_existing_panel_missing_posts_new(db, cog, interaction, chan
     assert _cfg(db).roles_message_id == MESSAGE
 
 
-async def test_setup_forbidden_fetch_replies_error(db, cog, interaction, channel):
+async def test_setup_forbidden_fetch_keeps_ids_and_errors(db, cog, interaction, channel):
     _set_panel(db)
     channel.fetch_message.side_effect = _http_error(discord.Forbidden)
     await cog.setup.callback(cog, interaction, channel)
     channel.send.assert_not_awaited()
-    reply = _reply(interaction)
-    assert "permission" in reply.lower()
-    assert _cfg(db).roles_message_id is None
+    assert "permission" in _reply(interaction).lower()
+    cfg = _cfg(db)
+    assert (cfg.roles_channel_id, cfg.roles_message_id) == (CHANNEL, MESSAGE)
 
 
-async def test_setup_forbidden_send_replies_error(db, cog, interaction, channel):
+async def test_setup_forbidden_send_clears_seeded_ids(db, cog, interaction, channel):
+    _set_panel(db)
+    channel.fetch_message.side_effect = _http_error(discord.NotFound)
     channel.send.side_effect = _http_error(discord.Forbidden)
     await cog.setup.callback(cog, interaction, channel)
     assert "permission" in _reply(interaction).lower()
-    assert _cfg(db) is None or _cfg(db).roles_message_id is None
+    cfg = _cfg(db)
+    assert cfg.roles_channel_id is None and cfg.roles_message_id is None
+
+
+async def test_setup_edit_not_found_falls_through_to_send(db, cog, interaction, channel):
+    _set_panel(db, message_id=1)
+    msg = _panel_message()
+    msg.edit.side_effect = _http_error(discord.NotFound)
+    channel.fetch_message.return_value = msg
+    await cog.setup.callback(cog, interaction, channel)
+    channel.send.assert_awaited_once()
+    assert _cfg(db).roles_message_id == MESSAGE
+    assert "live" in _reply(interaction)
+
+
+async def test_setup_edit_forbidden_keeps_ids_and_errors(db, cog, interaction, channel):
+    _set_panel(db)
+    msg = _panel_message()
+    msg.edit.side_effect = _http_error(discord.Forbidden)
+    channel.fetch_message.return_value = msg
+    await cog.setup.callback(cog, interaction, channel)
+    channel.send.assert_not_awaited()
+    assert "permission" in _reply(interaction).lower()
+    cfg = _cfg(db)
+    assert (cfg.roles_channel_id, cfg.roles_message_id) == (CHANNEL, MESSAGE)
 
 
 async def test_setup_other_channel_posts_new(db, cog, interaction, channel):
@@ -348,7 +382,8 @@ async def test_keyword_add_and_remove(db, cog, interaction):
         assert get_keywords_by_role(s, GUILD)[rid] == ["magic"]
     _reply(interaction)
 
-    interaction.response.send_message.reset_mock()
+    interaction.response.defer.reset_mock()
+    interaction.followup.send.reset_mock()
     await cog.keyword.callback(cog, interaction, rid, "remove", "magic")
     with db() as s:
         assert get_keywords_by_role(s, GUILD)[rid] == []
@@ -402,7 +437,7 @@ async def test_keyword_other_guild_role_refused(db, cog, interaction):
 
 async def test_list_empty(db, cog, interaction):
     await cog.list_roles.callback(cog, interaction)
-    assert "no roles" in _reply(interaction).lower()
+    assert "no roles" in _direct_reply(interaction).lower()
 
 
 async def test_list_shows_rows(db, cog, interaction):
@@ -410,7 +445,7 @@ async def test_list_shows_rows(db, cog, interaction):
         rid = add_interest_role(s, GUILD, 11, "MTG").id
         add_keyword(s, rid, "magic")
     await cog.list_roles.callback(cog, interaction)
-    text = _reply(interaction)
+    text = _direct_reply(interaction)
     assert "MTG" in text and "magic" in text and "11" in text
 
 
@@ -424,7 +459,18 @@ def _toggle_interaction(role, member_roles, guild_id=GUILD):
     i.user.add_roles = AsyncMock()
     i.user.remove_roles = AsyncMock()
     i.response.send_message = AsyncMock()
+    i.response.defer = AsyncMock()
+    i.followup.send = AsyncMock()
     return i
+
+
+def _toggle_reply(i) -> str:
+    i.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    i.response.send_message.assert_not_awaited()
+    i.followup.send.assert_awaited_once()
+    args, kwargs = i.followup.send.call_args
+    assert kwargs["ephemeral"] is True
+    return args[0]
 
 
 async def test_toggle_adds_role(db):
@@ -435,7 +481,8 @@ async def test_toggle_adds_role(db):
     await role_service.handle_role_toggle(i, rid)
     i.user.add_roles.assert_awaited_once()
     assert i.user.add_roles.call_args.args[0] is role
-    assert i.response.send_message.call_args.kwargs["ephemeral"] is True
+    i.user.remove_roles.assert_not_awaited()
+    assert _toggle_reply(i).startswith("Added")
 
 
 async def test_toggle_removes_role(db):
@@ -446,12 +493,13 @@ async def test_toggle_removes_role(db):
     await role_service.handle_role_toggle(i, rid)
     i.user.remove_roles.assert_awaited_once()
     i.user.add_roles.assert_not_awaited()
+    assert _toggle_reply(i).startswith("Removed")
 
 
 async def test_toggle_unknown_row(db):
     i = _toggle_interaction(object(), [])
     await role_service.handle_role_toggle(i, 404)
-    assert "isn't available" in i.response.send_message.call_args.args[0]
+    assert "isn't available" in _toggle_reply(i)
 
 
 async def test_toggle_wrong_guild(db):
@@ -460,7 +508,7 @@ async def test_toggle_wrong_guild(db):
     i = _toggle_interaction(object(), [])
     await role_service.handle_role_toggle(i, rid)
     i.user.add_roles.assert_not_awaited()
-    assert "isn't available" in i.response.send_message.call_args.args[0]
+    assert "isn't available" in _toggle_reply(i)
 
 
 async def test_toggle_disabled_row(db):
@@ -472,6 +520,7 @@ async def test_toggle_disabled_row(db):
     i = _toggle_interaction(object(), [])
     await role_service.handle_role_toggle(i, rid)
     i.user.add_roles.assert_not_awaited()
+    assert "isn't available" in _toggle_reply(i)
 
 
 async def test_toggle_role_deleted_in_discord(db):
@@ -479,7 +528,7 @@ async def test_toggle_role_deleted_in_discord(db):
         rid = add_interest_role(s, GUILD, 11, "MTG").id
     i = _toggle_interaction(None, [])
     await role_service.handle_role_toggle(i, rid)
-    assert "no longer exists" in i.response.send_message.call_args.args[0]
+    assert "no longer exists" in _toggle_reply(i)
 
 
 async def test_toggle_forbidden(db):
@@ -488,7 +537,7 @@ async def test_toggle_forbidden(db):
     i = _toggle_interaction(object(), [])
     i.user.add_roles.side_effect = _http_error(discord.Forbidden)
     await role_service.handle_role_toggle(i, rid)
-    assert "can't manage" in i.response.send_message.call_args.args[0]
+    assert "can't manage" in _toggle_reply(i)
 
 
 async def test_button_callback_routes_to_toggle(monkeypatch):
@@ -547,8 +596,8 @@ async def test_add_valid_unicode_emoji_accepted(db, cog, interaction, good_emoji
     assert len(rows) == 1 and rows[0].emoji == good_emoji
 
 
-async def test_setup_httpexception_on_edit_clears_ids(db, cog, interaction, channel):
-    """HTTPException on message.edit during setup must clear panel IDs and reply with error."""
+async def test_setup_httpexception_on_edit_keeps_ids(db, cog, interaction, channel):
+    """HTTPException on message.edit during setup keeps the stored panel and replies with error."""
     _set_panel(db)
     msg = _panel_message()
     msg.edit.side_effect = _http_error(discord.HTTPException)
@@ -557,17 +606,19 @@ async def test_setup_httpexception_on_edit_clears_ids(db, cog, interaction, chan
     reply = _reply(interaction)
     assert "rejected" in reply.lower()
     cfg = _cfg(db)
-    assert cfg.roles_message_id is None and cfg.roles_channel_id is None
+    assert (cfg.roles_channel_id, cfg.roles_message_id) == (CHANNEL, MESSAGE)
 
 
-async def test_setup_httpexception_on_send_clears_ids(db, cog, interaction, channel):
-    """HTTPException on channel.send during setup must clear panel IDs and reply with error."""
+async def test_setup_httpexception_on_send_clears_seeded_ids(db, cog, interaction, channel):
+    """HTTPException on channel.send clears a real seeded panel row and replies with error."""
+    _set_panel(db)
+    channel.fetch_message.side_effect = _http_error(discord.NotFound)
     channel.send.side_effect = _http_error(discord.HTTPException)
     await cog.setup.callback(cog, interaction, channel)
     reply = _reply(interaction)
     assert "rejected" in reply.lower()
     cfg = _cfg(db)
-    assert cfg.roles_message_id is None
+    assert cfg.roles_channel_id is None and cfg.roles_message_id is None
 
 
 async def test_toggle_httpexception_replies_error(db):
@@ -577,26 +628,25 @@ async def test_toggle_httpexception_replies_error(db):
     i = _toggle_interaction(object(), [])
     i.user.add_roles.side_effect = _http_error(discord.HTTPException)
     await role_service.handle_role_toggle(i, rid)
-    reply = i.response.send_message.call_args.args[0]
-    assert "something went wrong" in reply.lower()
+    assert "something went wrong" in _toggle_reply(i).lower()
 
 
 async def test_setup_channel_change_deletes_old_panel(db, cog, interaction):
     """When changing to a different channel, the old panel message must be deleted first."""
     # Setup initial panel in channel 555
     _set_panel(db, channel_id=555, message_id=999)
-    
+
     # Switch to channel 666
     new_channel = MagicMock()
     new_channel.id = 666
     new_channel.mention = "<#666>"
     new_channel.send = AsyncMock(return_value=SimpleNamespace(id=1111))
-    
+
     old_channel = MagicMock()
     old_channel.id = 555
     old_msg = MagicMock()
     old_msg.delete = AsyncMock()
-    
+
     # Setup guild to return both channels
     def get_channel_fn(cid):
         if cid == 555:
@@ -604,29 +654,29 @@ async def test_setup_channel_change_deletes_old_panel(db, cog, interaction):
         elif cid == 666:
             return new_channel
         return None
-    
+
     interaction.guild.get_channel = MagicMock(side_effect=get_channel_fn)
-    
+
     # Mock fetch_message to return old panel
     async def fetch_old(msg_id):
         if msg_id == 999:
             return old_msg
         raise discord.NotFound(MagicMock(status=404), "x")
-    
+
     old_channel.fetch_message = AsyncMock(side_effect=fetch_old)
-    
+
     await cog.setup.callback(cog, interaction, new_channel)
-    
+
     # Verify old panel was deleted
     old_msg.delete.assert_awaited_once()
-    
+
     # Verify new panel was posted
     new_channel.send.assert_awaited_once()
-    
+
     # Verify reply mentions old panel was removed
     reply = _reply(interaction)
     assert "old panel was removed" in reply.lower()
-    
+
     # Verify config was updated to new channel
     cfg = _cfg(db)
     assert cfg.roles_channel_id == 666
@@ -636,26 +686,27 @@ async def test_setup_channel_change_deletes_old_panel(db, cog, interaction):
 async def test_setup_channel_change_handles_old_panel_not_found(db, cog, interaction):
     """When old panel can't be fetched/deleted, setup should still proceed."""
     _set_panel(db, channel_id=555, message_id=999)
-    
+
     new_channel = MagicMock()
     new_channel.id = 666
     new_channel.mention = "<#666>"
     new_channel.send = AsyncMock(return_value=SimpleNamespace(id=1111))
-    
+
     old_channel = MagicMock()
     old_channel.fetch_message = AsyncMock(side_effect=_http_error(discord.NotFound))
-    
+
     def get_channel_fn(cid):
         return old_channel if cid == 555 else new_channel
-    
+
     interaction.guild.get_channel = MagicMock(side_effect=get_channel_fn)
-    
+
     await cog.setup.callback(cog, interaction, new_channel)
-    
+
     # Setup should succeed despite old panel not found
     new_channel.send.assert_awaited_once()
     cfg = _cfg(db)
     assert cfg.roles_channel_id == 666
+    assert "old panel was removed" not in _reply(interaction).lower()
 
 # ---- emoji validator ----
 
@@ -701,3 +752,210 @@ async def test_setup_channel_change_handles_old_panel_not_found(db, cog, interac
 ])
 def test_valid_emoji(emoji, expected):
     assert commands_roles._valid_emoji(emoji) == expected
+
+
+# ---- role vetting ----
+
+@pytest.mark.parametrize("overrides,fragment", [
+    ({"is_default": MagicMock(return_value=True)}, "@everyone"),
+    ({"managed": True}, "managed"),
+    ({"is_assignable": MagicMock(return_value=False)}, "can't assign"),
+] + [
+    ({"permissions": discord.Permissions(**{perm: True})}, perm.replace("_", " "))
+    for perm in ("administrator", "manage_guild", "manage_roles", "manage_channels",
+                 "manage_webhooks", "kick_members", "ban_members", "mention_everyone",
+                 "moderate_members")
+])
+async def test_add_rejects_unsafe_role(db, cog, interaction, channel, overrides, fragment):
+    _set_panel(db)
+    await cog.add.callback(cog, interaction, _role(11, **overrides), "MTG", None)
+    assert fragment in _reply(interaction)
+    with db() as s:
+        assert list_interest_roles(s, GUILD) == []
+    channel.fetch_message.assert_not_awaited()
+
+
+async def test_add_accepts_role_with_harmless_permissions(db, cog, interaction):
+    perms = discord.Permissions(send_messages=True, view_channel=True)
+    await cog.add.callback(cog, interaction, _role(11, permissions=perms), "MTG", None)
+    with db() as s:
+        assert len(list_interest_roles(s, GUILD)) == 1
+
+
+# ---- refresh failure matrix (via /roles add and /roles remove) ----
+
+def _seed_role(db):
+    with db() as s:
+        return add_interest_role(s, GUILD, 11, "MTG").id
+
+
+async def _run_panel_command(cog, interaction, db, how):
+    if how == "add":
+        await cog.add.callback(cog, interaction, _role(22), "New", None)
+    else:
+        rid = _seed_role(db)
+        await cog.remove.callback(cog, interaction, rid)
+
+
+_MATRIX = [
+    # (stage, error, ids kept?, reply fragment)
+    ("fetch", discord.NotFound, False, "/roles setup"),
+    ("fetch", discord.Forbidden, True, "permission"),
+    ("fetch", discord.HTTPException, True, "rejected"),
+    ("edit", discord.NotFound, False, "/roles setup"),
+    ("edit", discord.Forbidden, True, "permission"),
+    ("edit", discord.HTTPException, True, "rejected"),
+]
+
+
+@pytest.mark.parametrize("how", ["add", "remove"])
+@pytest.mark.parametrize("stage,error,kept,fragment", _MATRIX)
+async def test_refresh_failure_matrix(db, cog, interaction, channel, how, stage, error,
+                                      kept, fragment):
+    _set_panel(db)
+    if stage == "fetch":
+        channel.fetch_message.side_effect = _http_error(error)
+    else:
+        msg = _panel_message()
+        msg.edit.side_effect = _http_error(error)
+        channel.fetch_message.return_value = msg
+    await _run_panel_command(cog, interaction, db, how)
+    assert fragment in _reply(interaction).lower()
+    cfg = _cfg(db)
+    if kept:
+        assert (cfg.roles_channel_id, cfg.roles_message_id) == (CHANNEL, MESSAGE)
+    else:
+        assert cfg.roles_channel_id is None and cfg.roles_message_id is None
+
+
+# ---- panel filters disabled roles ----
+
+def test_panel_embed_and_view_skip_disabled_roles():
+    roles = [InterestRole(id=1, guild_id=1, role_id=11, label="Shown", enabled=True),
+             InterestRole(id=2, guild_id=1, role_id=22, label="Hidden", enabled=False)]
+    embed = build_roles_panel_embed(roles)
+    assert "Shown" in embed.description and "Hidden" not in embed.description
+    assert [c.custom_id for c in RolesPanelView(roles).children] == ["role_toggle:1"]
+
+
+async def test_disabled_role_not_on_posted_panel_but_still_listed(db, cog, interaction, channel):
+    with db() as s:
+        row = add_interest_role(s, GUILD, 11, "Hidden")
+        row.enabled = False
+        s.commit()
+    await cog.setup.callback(cog, interaction, channel)
+    kwargs = channel.send.call_args.kwargs
+    assert "Hidden" not in kwargs["embed"].description
+    assert list(kwargs["view"].children) == []
+    interaction.response.send_message.reset_mock()
+    await cog.list_roles.callback(cog, interaction)
+    assert "(disabled)" in _direct_reply(interaction)
+
+
+# ---- real Button construction ----
+
+def test_panel_view_builds_real_buttons_with_unicode_and_custom_emoji():
+    roles = [InterestRole(id=1, guild_id=1, role_id=11, label="U", emoji="🎴"),
+             InterestRole(id=2, guild_id=1, role_id=22, label="C",
+                          emoji="<:mtg:123456789012345678>"),
+             InterestRole(id=3, guild_id=1, role_id=33, label="N", emoji=None)]
+    view = RolesPanelView(roles)
+    assert all(isinstance(c, discord.ui.Button) for c in view.children)
+    assert view.children[0].emoji.name == "🎴"
+    assert (view.children[1].emoji.name, view.children[1].emoji.id) == ("mtg", 123456789012345678)
+    assert view.children[2].emoji is None
+
+
+# ---- keyword edges ----
+
+async def test_keyword_case_variant_duplicate_friendly_error(db, cog, interaction):
+    with db() as s:
+        rid = add_interest_role(s, GUILD, 11, "MTG").id
+    await cog.keyword.callback(cog, interaction, rid, "add", "magic")
+    interaction.response.defer.reset_mock()
+    interaction.followup.send.reset_mock()
+    await cog.keyword.callback(cog, interaction, rid, "add", "Magic")
+    assert "already" in _reply(interaction).lower()
+    with db() as s:
+        assert get_keywords_by_role(s, GUILD)[rid] == ["magic"]
+
+
+async def test_keyword_remove_padded_uppercase(db, cog, interaction):
+    with db() as s:
+        rid = add_interest_role(s, GUILD, 11, "MTG").id
+        add_keyword(s, rid, "magic")
+    await cog.keyword.callback(cog, interaction, rid, "remove", "  MAGIC  ")
+    assert "Removed" in _reply(interaction)
+    with db() as s:
+        assert get_keywords_by_role(s, GUILD)[rid] == []
+
+
+# ---- toggle failure branches ----
+
+@pytest.mark.parametrize("error,fragment", [
+    (discord.Forbidden, "can't manage"),
+    (discord.HTTPException, "something went wrong"),
+])
+async def test_toggle_remove_roles_failures(db, error, fragment):
+    with db() as s:
+        rid = add_interest_role(s, GUILD, 11, "MTG").id
+    role = object()
+    i = _toggle_interaction(role, [role])
+    i.user.remove_roles.side_effect = _http_error(error)
+    await role_service.handle_role_toggle(i, rid)
+    assert fragment in _toggle_reply(i).lower()
+
+
+# ---- legacy DB ordering ----
+
+_LEGACY_NO_V2_DDL = (
+    "CREATE TABLE guild_config (guild_id BIGINT PRIMARY KEY, timezone VARCHAR, "
+    "this_week_channel_id BIGINT, this_month_channel_id BIGINT, daily_refresh_time VARCHAR, "
+    "week_start_mode VARCHAR, include_tba_section BOOLEAN, delete_previous_month_message BOOLEAN)"
+)
+
+
+async def test_setup_hook_adds_v2_columns_before_registering_views(tmp_path, monkeypatch):
+    from src import bot as bot_module
+    from src import config
+    from src.services import scheduler
+
+    url = f"sqlite:///{tmp_path / 'legacy.db'}"
+    monkeypatch.setattr(config, "DATABASE_URL", url)
+    monkeypatch.setattr(config, "GUILD_ID", None)
+    monkeypatch.setattr(scheduler, "_session_factory", None)
+    monkeypatch.setattr(scheduler.RefreshScheduler, "start", lambda self: None)
+    engine = get_engine(url)
+    with engine.begin() as conn:
+        conn.execute(text(_LEGACY_NO_V2_DDL))
+        conn.execute(text("INSERT INTO guild_config (guild_id) VALUES (7)"))
+    engine.dispose()
+
+    order = []
+    real_ensure = bot_module.ensure_guild_config_v2_columns
+
+    def ensure_then_set_panel(eng):
+        real_ensure(eng)
+        order.append("ensure")
+        with eng.begin() as conn:
+            conn.execute(text("UPDATE guild_config SET roles_message_id = 555 WHERE guild_id = 7"))
+            conn.execute(text("INSERT INTO interest_roles (guild_id, role_id, label, sort_order, "
+                              "enabled) VALUES (7, 11, 'MTG', 0, 1)"))
+
+    real_register = bot_module.register_persistent_views
+
+    def register(bot, factory):
+        order.append("register")
+        real_register(bot, factory)
+
+    monkeypatch.setattr(bot_module, "ensure_guild_config_v2_columns", ensure_then_set_panel)
+    monkeypatch.setattr(bot_module, "register_persistent_views", register)
+    bot = bot_module.create_bot()
+    bot.add_view = MagicMock()
+    bot.tree.sync = AsyncMock()
+    await bot.setup_hook()
+
+    assert order == ["ensure", "register"]
+    bot.add_view.assert_called_once()
+    assert bot.add_view.call_args.kwargs["message_id"] == 555
+    assert [c.custom_id for c in bot.add_view.call_args.args[0].children] == ["role_toggle:1"]

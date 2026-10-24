@@ -1,7 +1,11 @@
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
+from sqlalchemy.dialects import sqlite
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.schema import CreateTable
 
-from src.db.models import Base, EventRolePing, RoleKeyword
+from src.db.models import EventRolePing, InterestRole, RoleKeyword
+from src.db import repositories
 from src.db.repositories import (
     add_interest_role, add_keyword, get_keywords_by_role, has_ping,
     list_interest_roles, record_ping, remove_interest_role, remove_keyword,
@@ -11,16 +15,8 @@ from src.db.session import (
 )
 
 
-def _session():
-    engine = get_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    factory = get_session_factory("sqlite:///:memory:")
-    factory.configure(bind=engine)
-    return factory()
-
-
-def test_add_list_remove_role():
-    s = _session()
+def test_add_list_remove_role(session):
+    s = session
     r = add_interest_role(s, 1, 111, "Yu-Gi-Oh", emoji="🎴")
     assert r.id is not None
     roles = list_interest_roles(s, 1)
@@ -31,8 +27,8 @@ def test_add_list_remove_role():
     assert remove_interest_role(s, 1, 999) is False
 
 
-def test_keywords_and_ping_once():
-    s = _session()
+def test_keywords_and_ping_once(session):
+    s = session
     r = add_interest_role(s, 1, 111, "MTG")
     add_keyword(s, r.id, "mtg")
     add_keyword(s, r.id, "magic")
@@ -45,8 +41,8 @@ def test_keywords_and_ping_once():
     assert has_ping(s, 42, r.id) is True
 
 
-def test_guild_isolation():
-    s = _session()
+def test_guild_isolation(session):
+    s = session
     add_interest_role(s, 1, 111, "A")
     add_interest_role(s, 2, 222, "B")
     assert [x.label for x in list_interest_roles(s, 1)] == ["A"]
@@ -55,10 +51,9 @@ def test_guild_isolation():
     assert list_interest_roles(s, 2)[0].sort_order == 0
 
 
-def test_cascade_delete_removes_keywords_and_pings():
+def test_cascade_delete_removes_keywords_and_pings(session):
     """Verify that removing a role cascades to remove its keywords and pings."""
-    from sqlalchemy import select
-    s = _session()
+    s = session
     r = add_interest_role(s, 1, 111, "Test Role")
     add_keyword(s, r.id, "keyword1")
     add_keyword(s, r.id, "keyword2")
@@ -81,9 +76,9 @@ def test_cascade_delete_removes_keywords_and_pings():
     assert len(orphan_pings) == 0
 
 
-def test_remove_interest_role_guild_guard():
+def test_remove_interest_role_guild_guard(session):
     """Verify that remove_interest_role enforces guild isolation."""
-    s = _session()
+    s = session
     r1 = add_interest_role(s, 1, 111, "Guild 1 Role")
     add_interest_role(s, 2, 222, "Guild 2 Role")
 
@@ -95,9 +90,9 @@ def test_remove_interest_role_guild_guard():
     assert list_interest_roles(s, 1)[0].id == r1.id
 
 
-def test_add_keyword_rejects_empty_input():
+def test_add_keyword_rejects_empty_input(session):
     """Verify that add_keyword rejects empty or whitespace-only keywords."""
-    s = _session()
+    s = session
     r = add_interest_role(s, 1, 111, "Test Role")
 
     # Empty string should raise ValueError
@@ -111,9 +106,9 @@ def test_add_keyword_rejects_empty_input():
         add_keyword(s, r.id, "\t\n")
 
 
-def test_interest_role_sort_order_increments():
+def test_interest_role_sort_order_increments(session):
     """Verify that sort_order increments correctly for multiple roles in same guild."""
-    s = _session()
+    s = session
     r1 = add_interest_role(s, 1, 111, "First")
     r2 = add_interest_role(s, 1, 222, "Second")
     r3 = add_interest_role(s, 1, 333, "Third")
@@ -165,5 +160,79 @@ def test_ensure_guild_config_v2_columns_idempotent_on_legacy_table(tmp_path):
         assert "roles_channel_id" in cols
         assert "roles_message_id" in cols
         assert "announce_channel_id" in cols
+    finally:
+        engine.dispose()
+
+
+def test_interest_role_ids_never_reused_after_delete(session):
+    r1 = add_interest_role(session, 1, 111, "First")
+    first_id = r1.id
+    assert remove_interest_role(session, 1, first_id) is True
+    r2 = add_interest_role(session, 1, 222, "Second")
+    assert r2.id > first_id
+
+
+def test_interest_roles_ddl_uses_autoincrement():
+    ddl = str(CreateTable(InterestRole.__table__).compile(dialect=sqlite.dialect()))
+    assert "AUTOINCREMENT" in ddl
+
+
+def test_record_ping_twice_one_row(session):
+    r = add_interest_role(session, 1, 111, "MTG")
+    record_ping(session, 1, 42, r.id)
+    record_ping(session, 1, 42, r.id)
+    rows = session.execute(select(EventRolePing)).scalars().all()
+    assert len(rows) == 1
+
+
+def test_record_ping_concurrent_duplicate_does_not_raise(session, monkeypatch):
+    r = add_interest_role(session, 1, 111, "MTG")
+    record_ping(session, 1, 42, r.id)
+    # Simulate the race: has_ping saw nothing, but the row landed before our commit.
+    monkeypatch.setattr(repositories, "has_ping", lambda *a, **k: False)
+    record_ping(session, 1, 42, r.id)
+    assert len(session.execute(select(EventRolePing)).scalars().all()) == 1
+    record_ping(session, 1, 43, r.id)  # session still usable after rollback
+    assert len(session.execute(select(EventRolePing)).scalars().all()) == 2
+
+
+def test_v2_columns_partial_migration_succeeds(tmp_path):
+    engine = _legacy_guild_config_db(f"sqlite:///{tmp_path / 'partial.db'}")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE guild_config ADD COLUMN roles_channel_id BIGINT"))
+        ensure_guild_config_v2_columns(engine)
+        cols = {c["name"] for c in inspect(engine).get_columns("guild_config")}
+        assert {"roles_channel_id", "roles_message_id", "announce_channel_id"} <= cols
+    finally:
+        engine.dispose()
+
+
+def test_v2_columns_preexisting_row_survives_with_nulls_then_populates(tmp_path):
+    engine = _legacy_guild_config_db(f"sqlite:///{tmp_path / 'row.db'}")
+    try:
+        ensure_guild_config_v2_columns(engine)
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT timezone, roles_channel_id, roles_message_id, announce_channel_id "
+                "FROM guild_config WHERE guild_id = 1")).one()
+            assert tuple(row) == ("UTC", None, None, None)
+            conn.execute(text("UPDATE guild_config SET roles_channel_id = 10, "
+                              "roles_message_id = 20, announce_channel_id = 30 "
+                              "WHERE guild_id = 1"))
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT roles_channel_id, roles_message_id, announce_channel_id "
+                "FROM guild_config WHERE guild_id = 1")).one()
+        assert tuple(row) == (10, 20, 30)
+    finally:
+        engine.dispose()
+
+
+def test_v2_columns_non_duplicate_operational_error_reraises(tmp_path):
+    engine = get_engine(f"sqlite:///{tmp_path / 'empty.db'}")  # no guild_config table
+    try:
+        with pytest.raises(OperationalError):
+            ensure_guild_config_v2_columns(engine)
     finally:
         engine.dispose()
