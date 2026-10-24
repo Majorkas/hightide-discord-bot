@@ -14,9 +14,11 @@ from src.db.repositories import (
     list_interest_roles, remove_interest_role, remove_keyword,
 )
 from src.db.session import get_session_factory
+from src.discord_ui.embeds import _md_escape
 from src.discord_ui.role_views import (
     MAX_PANEL_ROLES, RolesPanelView, build_roles_panel_embed,
 )
+from src.services.deck_service import build_card_embed, scryfall_card
 
 _MAX_LABEL_LEN = 60
 _MAX_EMOJI_LEN = 64
@@ -331,3 +333,29 @@ class RolesCog(commands.Cog):
         if len(text) > _MAX_MESSAGE_CHARS:
             text = text[:_MAX_MESSAGE_CHARS] + "\n…"
         await interaction.response.send_message(text, ephemeral=True)
+
+    # Top-level /card command (public, non-ephemeral on success for sharing)
+    @app_commands.command(
+        name="card",
+        description="Look up a Magic card on Scryfall"
+    )
+    @app_commands.guild_only()
+    async def card_lookup(self, interaction: discord.Interaction, name: str) -> None:
+        """Look up a Magic card by name and display its details."""
+        try:
+            card = await scryfall_card(name)
+            if card is None:
+                # Card not found - check for suggestion in error response
+                await interaction.response.send_message(
+                    f"No card found for '{_md_escape(name)}'.",
+                    ephemeral=True
+                )
+                return
+            
+            embed = build_card_embed(card)
+            await interaction.response.send_message(embed=embed, ephemeral=False)
+        except Exception as e:
+            await interaction.response.send_message(
+                "Scryfall is having trouble — try again shortly.",
+                ephemeral=True
+            )

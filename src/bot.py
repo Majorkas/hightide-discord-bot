@@ -56,6 +56,7 @@ def create_bot() -> commands.Bot:
     from src.discord_ui.commands_roles import RolesCog
     roles_cog = RolesCog(bot)
     bot.tree.add_command(roles_cog.roles_group)
+    bot.tree.add_command(roles_cog.card_lookup)  # Top-level /card command
 
     @bot.event
     async def setup_hook() -> None:
