@@ -58,6 +58,8 @@ def ensure_guild_config_v2_columns(engine) -> None:
         ("daily_post_time", "VARCHAR NOT NULL DEFAULT '09:00'"),
         ("last_daily_post_date", "VARCHAR"),
         ("wants_channel_id", "BIGINT"),
+        ("new_stock_channel_id", "BIGINT"),
+        ("new_stock_cat_slugs", "VARCHAR NOT NULL DEFAULT 'pre-orders'"),
     ]
     for col_name, col_type in columns:
         try:

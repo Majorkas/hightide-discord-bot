@@ -14,6 +14,7 @@ from src.db.session import get_session_factory
 from src.discord_ui.embeds import build_tonight_embed
 from src.services.board_service import upsert_board
 from src.services.event_service import refresh_events
+from src.services.product_service import check_new_products, post_product_alerts
 from src.services.role_service import _resolve_channel, ping_new_events
 from src.services.want_service import update_wants_board
 
@@ -23,7 +24,7 @@ _RETRY_INTERVAL = timedelta(minutes=30)
 _MAX_RETRY_DELAY = timedelta(hours=2)
 # Result keys of auxiliary steps whose errors must not drive retry backoff;
 # every new auxiliary step MUST be added here.
-_NON_DRIVING_KEYS = ("pings", "wants", "tonight")
+_NON_DRIVING_KEYS = ("pings", "wants", "tonight", "products")
 
 # Created lazily; tests can monkeypatch or reset to None.
 _session_factory = None
@@ -114,6 +115,15 @@ async def _run_daily_refresh_locked(bot, guild_id: int, *, fetch: bool) -> dict:
                 log.exception("wants board update failed")
                 session.rollback()
                 result["wants"] = f"error:{type(e).__name__}"
+        if fetch and cfg.new_stock_channel_id:
+            try:
+                products = await asyncio.to_thread(
+                    check_new_products, session, guild_id, "https://hightidetabletop.com.au", tz)
+                result["products"] = await post_product_alerts(bot, session, guild_id, products)
+            except Exception as e:
+                log.exception("new product alerts failed")
+                session.rollback()
+                result["products"] = f"error:{type(e).__name__}"
         log.info("daily refresh: %s", result)
         return result
 

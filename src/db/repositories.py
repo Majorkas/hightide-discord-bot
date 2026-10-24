@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from src.db.models import (
     BoardPost, Event, EventRolePing, EventSignup, EventSource, GuildConfig,
-    InterestRole, RoleKeyword,
+    InterestRole, ProductAlert, RoleKeyword,
 )
 
 
@@ -163,6 +163,23 @@ def record_ping(session: Session, guild_id: int, event_id: int, interest_role_id
         session.commit()
     except IntegrityError:
         session.rollback()  # concurrent record of the same ping
+
+
+def get_alerted_product_ids(session: Session, guild_id: int) -> set[str]:
+    stmt = select(ProductAlert.external_id).where(ProductAlert.guild_id == guild_id)
+    return set(session.execute(stmt).scalars())
+
+
+def record_product_alerts(session: Session, guild_id: int, external_ids) -> None:
+    """Idempotently record alerted products for a guild in one commit."""
+    new = set(external_ids) - get_alerted_product_ids(session, guild_id)
+    if not new:
+        return
+    session.add_all(ProductAlert(guild_id=guild_id, external_id=x) for x in sorted(new))
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()  # concurrent record of the same alerts
 
 
 def get_event_by_id(session: Session, guild_id: int, event_id: int) -> Event | None:

@@ -13,6 +13,7 @@ from src import config
 from src.db.models import EventSource, WeeklyRecurring
 from src.db.repositories import get_or_create_config
 from src.db.session import get_session_factory
+from src.services.product_service import parse_category_slugs
 from src.services.weekly_service import get_weekly_rows, seed_weekly_recurring
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -161,6 +162,38 @@ class AdminCog(commands.Cog):
             session.commit()
         await interaction.response.send_message(
             f"wants channel set to {channel.mention}", ephemeral=True)
+
+    @config_group.command(
+        name="new_stock_channel",
+        description="Channel for new-product alerts from watched shop categories")
+    async def set_new_stock_channel(self, interaction: discord.Interaction,
+                                    channel: discord.TextChannel) -> None:
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            cfg.new_stock_channel_id = channel.id
+            session.commit()
+        await interaction.response.send_message(
+            f"new-stock channel set to {channel.mention}", ephemeral=True)
+
+    @config_group.command(
+        name="new_stock_categories",
+        description="Shop category slugs to watch for new products (comma-separated)")
+    async def set_new_stock_categories(self, interaction: discord.Interaction,
+                                       slugs: str) -> None:
+        try:
+            parsed = parse_category_slugs(slugs)
+        except ValueError:
+            await interaction.response.send_message(
+                "Invalid categories. Use up to 10 comma-separated slugs "
+                "(lowercase letters, digits, hyphens; max 50 chars each), e.g. pre-orders.",
+                ephemeral=True)
+            return
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            cfg.new_stock_cat_slugs = ",".join(parsed)
+            session.commit()
+        await interaction.response.send_message(
+            f"watching categories: {', '.join(parsed)}", ephemeral=True)
 
     @config_group.command(
         name="daily_post_time",

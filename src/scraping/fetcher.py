@@ -44,20 +44,25 @@ def _get(client: httpx.Client, url: str, **params) -> httpx.Response:
     return resp
 
 
-def resolve_events_category_id(base_url: str,
-                               client: httpx.Client | None = None) -> int:
+def resolve_category_id(base_url: str, cat_slug: str,
+                        client: httpx.Client | None = None) -> int:
     if client is None:
         with httpx.Client() as own:
-            return resolve_events_category_id(base_url, own)
-    resp = _get(client, f"{base_url}/wp-json/wp/v2/product_cat", slug="events")
+            return resolve_category_id(base_url, cat_slug, own)
+    resp = _get(client, f"{base_url}/wp-json/wp/v2/product_cat", slug=cat_slug)
     data = resp.json()
     if not data:
-        raise FetchError("events category not found")
+        raise FetchError(f"{cat_slug} category not found")
     return int(data[0]["id"])
 
 
-def _fetch_all(client: httpx.Client, base_url: str) -> list[dict]:
-    cat_id = resolve_events_category_id(base_url, client)
+def resolve_events_category_id(base_url: str,
+                               client: httpx.Client | None = None) -> int:
+    return resolve_category_id(base_url, "events", client)
+
+
+def _fetch_all(client: httpx.Client, base_url: str, cat_slug: str) -> list[dict]:
+    cat_id = resolve_category_id(base_url, cat_slug, client)
     products: list[dict] = []
     page = 1
     while True:
@@ -81,16 +86,22 @@ def _fetch_all(client: httpx.Client, base_url: str) -> list[dict]:
     if len(products) > MAX_PRODUCTS:
         log.warning("truncating %d products to cap of %d", len(products), MAX_PRODUCTS)
         products = products[:MAX_PRODUCTS]
-    log.info("fetched %d products from events category", len(products))
+    log.info("fetched %d products from %s category", len(products), cat_slug)
     return products
 
 
-def fetch_events(base_url: str, client: httpx.Client | None = None) -> list[dict]:
-    """Fetch all Events-category products across all pages."""
+def fetch_category_products(base_url: str, cat_slug: str,
+                            client: httpx.Client | None = None) -> list[dict]:
+    """Fetch all products in a category (by slug) across all pages."""
     base_url = base_url.rstrip("/")
     if urlparse(base_url).scheme != "https":
         raise FetchError("base_url must use https")
     if client is not None:
-        return _fetch_all(client, base_url)
+        return _fetch_all(client, base_url, cat_slug)
     with httpx.Client() as own:
-        return _fetch_all(own, base_url)
+        return _fetch_all(own, base_url, cat_slug)
+
+
+def fetch_events(base_url: str, client: httpx.Client | None = None) -> list[dict]:
+    """Fetch all Events-category products across all pages."""
+    return fetch_category_products(base_url, "events", client)

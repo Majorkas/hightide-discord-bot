@@ -55,6 +55,10 @@ class GuildConfig(Base):
     # Local (guild tz) YYYY-MM-DD of the last tonight post.
     last_daily_post_date: Mapped[str | None] = mapped_column(String, nullable=True)
     wants_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    new_stock_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Comma-separated WooCommerce product_cat slugs to watch for new products.
+    new_stock_cat_slugs: Mapped[str] = mapped_column(
+        String, default="pre-orders", server_default="pre-orders")
 
 
 class WeeklyRecurring(Base):
@@ -178,3 +182,13 @@ class CardWant(Base):
     note: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ProductAlert(Base):
+    __tablename__ = "product_alerts"
+    __table_args__ = (UniqueConstraint("guild_id", "external_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    external_id: Mapped[str] = mapped_column(String)  # wp:{product_id}
+    alerted_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
