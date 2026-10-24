@@ -50,11 +50,13 @@ def ensure_guild_config_weekly_seeded(engine) -> None:
 
 
 def ensure_guild_config_v2_columns(engine) -> None:
-    """Add guild_config.roles_channel_id, .roles_message_id, .announce_channel_id to pre-existing DBs."""
+    """Add the v2 guild_config columns (roles, announce channel, daily post) to pre-existing DBs."""
     columns = [
         ("roles_channel_id", "BIGINT"),
         ("roles_message_id", "BIGINT"),
         ("announce_channel_id", "BIGINT"),
+        ("daily_post_time", "VARCHAR NOT NULL DEFAULT '09:30'"),
+        ("last_daily_post_date", "VARCHAR"),
     ]
     for col_name, col_type in columns:
         try:

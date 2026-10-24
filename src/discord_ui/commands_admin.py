@@ -124,6 +124,34 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(
             f"daily refresh set to {hhmm}", ephemeral=True)
 
+    @config_group.command(
+        name="announce_channel",
+        description="Channel for new-event pings and the daily Today at Hightide post")
+    async def set_announce_channel(self, interaction: discord.Interaction,
+                                   channel: discord.TextChannel) -> None:
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            cfg.announce_channel_id = channel.id
+            session.commit()
+        await interaction.response.send_message(
+            f"announce channel set to {channel.mention}", ephemeral=True)
+
+    @config_group.command(
+        name="daily_post_time",
+        description="Today-post time (v2: posts at the daily refresh time instead)")
+    async def set_daily_post_time(self, interaction: discord.Interaction, hhmm: str) -> None:
+        if not _HHMM_RE.match(hhmm):
+            await interaction.response.send_message(
+                "Invalid time. Use 24-hour HH:MM, e.g. 09:30.", ephemeral=True)
+            return
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            cfg.daily_post_time = hhmm
+            session.commit()
+        await interaction.response.send_message(
+            f"daily post time set to {hhmm} (currently posts at the daily refresh time)",
+            ephemeral=True)
+
     @config_group.command(name="include_tba")
     async def set_include_tba(self, interaction: discord.Interaction, value: bool) -> None:
         with _session() as session:

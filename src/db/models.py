@@ -51,6 +51,9 @@ class GuildConfig(Base):
     roles_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     roles_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     announce_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    daily_post_time: Mapped[str] = mapped_column(String, default="09:30", server_default="09:30")
+    # Local (guild tz) YYYY-MM-DD of the last tonight post.
+    last_daily_post_date: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class WeeklyRecurring(Base):

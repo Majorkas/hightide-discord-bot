@@ -3,16 +3,18 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import discord
 from discord.ext import tasks
 from sqlalchemy import select
 
 from src import config
 from src.db.models import Event, GuildConfig
-from src.db.repositories import get_or_create_config
+from src.db.repositories import get_active_events, get_or_create_config
 from src.db.session import get_session_factory
+from src.discord_ui.embeds import build_tonight_embed
 from src.services.board_service import upsert_board
 from src.services.event_service import refresh_events
-from src.services.role_service import ping_new_events
+from src.services.role_service import _resolve_channel, ping_new_events
 
 log = logging.getLogger("hightide.scheduler")
 
@@ -105,6 +107,35 @@ async def _run_daily_refresh_locked(bot, guild_id: int, *, fetch: bool) -> dict:
         return result
 
 
+async def _post_tonight(bot, session, cfg, tz, events, now: datetime) -> str:
+    today = now.astimezone(tz).strftime("%Y-%m-%d")
+    if cfg.announce_channel_id is None:
+        return "skipped:no_channel"
+    if cfg.last_daily_post_date == today:
+        return "skipped:already_posted"
+    # Every active event dated today in guild tz, including time-TBC ones.
+    todays = [e for e in events if e.is_active and e.starts_at is not None
+              and e.starts_at.astimezone(tz).strftime("%Y-%m-%d") == today]
+    embed = build_tonight_embed(todays, tz)
+    if embed is None:
+        return "skipped:no_events"
+    try:
+        channel = await _resolve_channel(bot, cfg.announce_channel_id)
+        if channel is None:
+            return "error:ChannelUnavailable"
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        log.exception("tonight post failed for guild %s", cfg.guild_id)
+        return f"error:{type(e).__name__}"
+    cfg.last_daily_post_date = today
+    session.commit()
+    return "posted"
+
+
+async def maybe_post_tonight(bot, session, cfg, tz, events, now: datetime) -> bool:
+    return await _post_tonight(bot, session, cfg, tz, events, now) == "posted"
+
+
 class RefreshScheduler:
     def __init__(self, bot):
         self.bot = bot
@@ -156,6 +187,16 @@ class RefreshScheduler:
                 self._retry_delay[guild_id] = _RETRY_INTERVAL
                 self._next_attempt[guild_id] = None
                 failed = False
+                # Outside the has_error scan above, so a tonight failure never drives backoff.
+                try:
+                    session.expire_all()
+                    result["tonight"] = await _post_tonight(
+                        self.bot, session, cfg, tz, get_active_events(session, guild_id), now)
+                except Exception as e:
+                    log.exception("tonight post failed for guild %s", guild_id)
+                    session.rollback()
+                    result["tonight"] = f"error:{type(e).__name__}"
+                log.info("tonight post: %s", result["tonight"])
         finally:
             if failed:
                 delay = self._retry_delay.get(guild_id, _RETRY_INTERVAL)

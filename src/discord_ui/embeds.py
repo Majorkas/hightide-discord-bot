@@ -53,6 +53,18 @@ def _event_line(e: Event, tz, with_day: bool = False) -> str:
     return f"{day_part}`{time_part}` {_link(e.title, e.url)}{price_part}"
 
 
+def build_tonight_embed(events: list[Event], tz) -> discord.Embed | None:
+    """Embed of the given same-day events (timed first, time-TBC last); None when empty."""
+    dated = [e for e in events if e.starts_at is not None]
+    if not dated:
+        return None
+    dated.sort(key=lambda e: (not e.time_known, e.starts_at, e.title))
+    day = dated[0].starts_at.astimezone(tz)
+    text, _ = _truncate_lines([_event_line(e, tz) for e in dated], 4000)
+    return discord.Embed(title=f"Today at Hightide — {day.strftime('%a %d %b')}",
+                         description=text, color=0x1F8B4C)
+
+
 def build_ping_message(event: Event, role_id: int, tz) -> str:
     if event.starts_at is None:
         day_part, time_part = "date TBC", "time TBC"

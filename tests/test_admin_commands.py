@@ -65,7 +65,7 @@ def test_command_surface():
     assert set(groups) == {"config", "source", "board", "events", "roles"}
     assert {c.name for c in groups["config"].commands} == {
         "this_week_channel", "this_month_channel", "timezone",
-        "daily_refresh_time", "include_tba",
+        "daily_refresh_time", "include_tba", "announce_channel", "daily_post_time",
         "weekly_list", "weekly_add", "weekly_remove", "weekly_image",
     }
     assert {c.name for c in groups["source"].commands} == {"list", "add", "remove"}

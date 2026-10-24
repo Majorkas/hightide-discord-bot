@@ -143,6 +143,19 @@ def _legacy_guild_config_db(url):
     return engine
 
 
+def test_ensure_guild_config_v2_columns_adds_daily_post_columns_with_default(tmp_path):
+    engine = _legacy_guild_config_db(f"sqlite:///{tmp_path / 'legacy_dp.db'}")
+    try:
+        ensure_guild_config_v2_columns(engine)
+        ensure_guild_config_v2_columns(engine)
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT daily_post_time, last_daily_post_date FROM guild_config")).one()
+        assert tuple(row) == ("09:30", None)
+    finally:
+        engine.dispose()
+
+
 def test_ensure_guild_config_v2_columns_idempotent_on_legacy_table(tmp_path):
     """Verify DDL helper adds v2 columns and is idempotent."""
     engine = _legacy_guild_config_db(f"sqlite:///{tmp_path / 'legacy_gc.db'}")
