@@ -53,10 +53,10 @@ Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/sup
 - [x] Task 3: Keyword matching + first-seen ping pipeline
 - [x] 4-agent council + fixes (pending-pings scan, ping caps, bootstrap silence, whitespace-folded matching; 675 tests green)
 
-## v2 Milestone 3 — Daily tonight post ⬜
+## v2 Milestone 3 — Daily tonight post ✅ (complete 2026-10-24)
 
-- [ ] Task 4: "Today at Hightide" post + config
-- [ ] 4-agent council + fixes
+- [x] Task 4: "Today at Hightide" post + config
+- [x] 4-agent council + fixes (events-step gating, default time, boundary coverage; 724 tests green)
 
 ## v2 Milestone 4 — Sign-ups ⬜
 
