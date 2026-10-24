@@ -232,6 +232,8 @@ Add the bot to your server with the following permissions:
 
 **Role hierarchy:** the bot's role must sit **above** the interest roles it assigns (Server Settings → Roles, drag the bot's role higher). Discord refuses role changes for roles at or above the bot's own, regardless of the Manage Roles permission. `/roles add` rejects @everyone, integration-managed roles, roles the bot can't assign, and roles with privileged permissions.
 
+**Role mentionability (required operator step):** after inviting the bot, enable **Allow anyone to @mention this role** (Server Settings → Roles → the role → Display) on each interest role. Otherwise the pings are posted but notify nobody. `/roles add` warns when a role isn't mentionable.
+
 **OAuth2 scopes**: `bot` and `applications.commands`
 
 **Invite URL template**:

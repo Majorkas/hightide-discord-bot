@@ -476,7 +476,7 @@ def _toggle_reply(i) -> str:
 async def test_toggle_adds_role(db):
     with db() as s:
         rid = add_interest_role(s, GUILD, 11, "MTG").id
-    role = object()
+    role = _role(11)
     i = _toggle_interaction(role, [])
     await role_service.handle_role_toggle(i, rid)
     i.user.add_roles.assert_awaited_once()
@@ -493,6 +493,26 @@ async def test_toggle_removes_role(db):
     await role_service.handle_role_toggle(i, rid)
     i.user.remove_roles.assert_awaited_once()
     i.user.add_roles.assert_not_awaited()
+    assert _toggle_reply(i).startswith("Removed")
+
+
+async def test_toggle_add_refuses_role_that_became_privileged(db):
+    with db() as s:
+        rid = add_interest_role(s, GUILD, 11, "MTG").id
+    role = _role(11, permissions=discord.Permissions(manage_guild=True))
+    i = _toggle_interaction(role, [])
+    await role_service.handle_role_toggle(i, rid)
+    i.user.add_roles.assert_not_awaited()
+    assert "can't be self-assigned" in _toggle_reply(i)
+
+
+async def test_toggle_remove_still_works_for_privileged_role(db):
+    with db() as s:
+        rid = add_interest_role(s, GUILD, 11, "MTG").id
+    role = _role(11, permissions=discord.Permissions(manage_guild=True))
+    i = _toggle_interaction(role, [role])
+    await role_service.handle_role_toggle(i, rid)
+    i.user.remove_roles.assert_awaited_once()
     assert _toggle_reply(i).startswith("Removed")
 
 
@@ -534,7 +554,7 @@ async def test_toggle_role_deleted_in_discord(db):
 async def test_toggle_forbidden(db):
     with db() as s:
         rid = add_interest_role(s, GUILD, 11, "MTG").id
-    i = _toggle_interaction(object(), [])
+    i = _toggle_interaction(_role(11), [])
     i.user.add_roles.side_effect = _http_error(discord.Forbidden)
     await role_service.handle_role_toggle(i, rid)
     assert "can't manage" in _toggle_reply(i)
@@ -625,7 +645,7 @@ async def test_toggle_httpexception_replies_error(db):
     """HTTPException during role toggle must reply with generic error message."""
     with db() as s:
         rid = add_interest_role(s, GUILD, 11, "MTG").id
-    i = _toggle_interaction(object(), [])
+    i = _toggle_interaction(_role(11), [])
     i.user.add_roles.side_effect = _http_error(discord.HTTPException)
     await role_service.handle_role_toggle(i, rid)
     assert "something went wrong" in _toggle_reply(i).lower()
@@ -773,6 +793,28 @@ async def test_add_rejects_unsafe_role(db, cog, interaction, channel, overrides,
     with db() as s:
         assert list_interest_roles(s, GUILD) == []
     channel.fetch_message.assert_not_awaited()
+
+
+_MENTION_WARNING = "isn't mentionable"
+
+
+async def test_add_mentionable_role_has_no_warning(db, cog, interaction):
+    interaction.guild.me.guild_permissions = discord.Permissions.none()
+    await cog.add.callback(cog, interaction, _role(11, mentionable=True), "MTG", None)
+    assert _MENTION_WARNING not in _reply(interaction)
+
+
+async def test_add_non_mentionable_role_warns_without_bot_permission(db, cog, interaction):
+    interaction.guild.me.guild_permissions = discord.Permissions.none()
+    await cog.add.callback(cog, interaction, _role(11, mentionable=False), "MTG", None)
+    assert _MENTION_WARNING in _reply(interaction)
+
+
+async def test_add_non_mentionable_role_no_warning_when_bot_can_mention_everyone(
+        db, cog, interaction):
+    interaction.guild.me.guild_permissions = discord.Permissions(mention_everyone=True)
+    await cog.add.callback(cog, interaction, _role(11, mentionable=False), "MTG", None)
+    assert _MENTION_WARNING not in _reply(interaction)
 
 
 async def test_add_accepts_role_with_harmless_permissions(db, cog, interaction):

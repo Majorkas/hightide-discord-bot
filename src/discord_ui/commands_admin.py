@@ -65,9 +65,9 @@ def _md_title(title: str) -> str:
 _UNDATED_SORT = datetime.max.replace(tzinfo=timezone.utc)
 
 
-def _event_choice_label(event) -> str:
+def _event_choice_label(event, tz) -> str:
     label = event.title if event.starts_at is None \
-        else f"{event.title} — {event.starts_at:%a %d %b}"
+        else f"{event.title} — {event.starts_at.astimezone(tz):%a %d %b}"
     return label[:100]
 
 
@@ -402,11 +402,12 @@ class AdminCog(commands.Cog):
         from src.db.repositories import get_active_events
         needle = current.strip().lower()
         with _session() as session:
+            tz = ZoneInfo(get_or_create_config(session, interaction.guild_id).timezone)
             events = get_active_events(session, interaction.guild_id)
             matches = sorted(
                 (e for e in events if needle in e.title.lower()),
                 key=lambda e: (e.starts_at is None, e.starts_at or _UNDATED_SORT, e.title))
-            choices = [(_event_choice_label(e), e.id) for e in matches[:25]]
+            choices = [(_event_choice_label(e, tz), e.id) for e in matches[:25]]
         return [app_commands.Choice(name=label, value=str(event_id))
                 for label, event_id in choices]
 

@@ -27,6 +27,7 @@ from src.services.deck_service import (
     AmbiguousCardError, build_card_embed, build_deck_embed, fetch_deck, parse_deck_url,
     scryfall_card,
 )
+from src.services.role_service import role_rejection_reason
 from src.services.want_service import add_want, list_wants, remove_want, update_wants_board
 
 log = logging.getLogger("hightide.discord_ui.commands_roles")
@@ -39,6 +40,9 @@ _MAX_CARD_NAME_LEN = 100
 _MAX_DECK_URL_LEN = 500
 _LOOKUP_TIMEOUT = 2.6
 _LOOKUP_COOLDOWN_SECONDS = 5.0
+_NOT_MENTIONABLE_NOTE = (
+    "\n⚠️ This role isn't mentionable — pings won't notify anyone until an admin enables "
+    "'Allow anyone to @mention this role' in role settings.")
 _PANEL_GONE_NOTE = " The panel message is gone — run /roles setup to post it again."
 _PANEL_FORBIDDEN_NOTE = (" I couldn't update the panel (missing permission to view or edit "
                          "it) — check my channel permissions.")
@@ -109,26 +113,8 @@ def _valid_emoji(emoji: str) -> bool:
     return has_emoji_codepoint
 
 
-_PRIVILEGED_PERMISSIONS = (
-    "administrator", "manage_guild", "manage_roles", "manage_channels", "manage_webhooks",
-    "kick_members", "ban_members", "mention_everyone", "moderate_members",
-)
-
-
 def _role_rejection(role: discord.Role) -> str | None:
-    """Why this role must never be self-assignable from the panel, or None if it's safe."""
-    if role.is_default():
-        return "@everyone can't be added to the panel."
-    if role.managed:
-        return "That role is managed by an integration and can't be assigned."
-    if not role.is_assignable():
-        return "I can't assign that role — move my role above it and give me Manage Roles."
-    perms = role.permissions
-    risky = [n.replace("_", " ") for n in _PRIVILEGED_PERMISSIONS if getattr(perms, n)]
-    if risky:
-        return ("That role has privileged permissions (" + ", ".join(risky)
-                + ") and can't be self-assigned from the panel.")
-    return None
+    return role_rejection_reason(role)
 
 
 async def _refresh_panel(guild: discord.Guild, session: Session, guild_id: int) -> str:
@@ -278,6 +264,9 @@ class RolesCog(commands.Cog):
                 return
             row_id = row.id
             note = await _refresh_panel(interaction.guild, session, interaction.guild_id)
+        if not role.mentionable \
+                and not interaction.guild.me.guild_permissions.mention_everyone:
+            note += _NOT_MENTIONABLE_NOTE
         await interaction.followup.send(
             f"Added **{_esc(label)}** (id {row_id}).{note}", ephemeral=True)
 

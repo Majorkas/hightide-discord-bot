@@ -31,6 +31,28 @@ def _session() -> Session:
     return _session_factory()
 
 
+_PRIVILEGED_PERMISSIONS = (
+    "administrator", "manage_guild", "manage_roles", "manage_channels", "manage_webhooks",
+    "kick_members", "ban_members", "mention_everyone", "moderate_members",
+)
+
+
+def role_rejection_reason(role: discord.Role) -> str | None:
+    """Why this role must never be self-assignable from the panel, or None if it's safe."""
+    if role.is_default():
+        return "@everyone can't be added to the panel."
+    if role.managed:
+        return "That role is managed by an integration and can't be assigned."
+    if not role.is_assignable():
+        return "I can't assign that role — move my role above it and give me Manage Roles."
+    perms = role.permissions
+    risky = [n.replace("_", " ") for n in _PRIVILEGED_PERMISSIONS if getattr(perms, n)]
+    if risky:
+        return ("That role has privileged permissions (" + ", ".join(risky)
+                + ") and can't be self-assigned from the panel.")
+    return None
+
+
 async def handle_role_toggle(interaction: discord.Interaction, role_row_id: int) -> None:
     # thinking=True is required for the ephemeral flag to apply to a component interaction.
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -52,6 +74,10 @@ async def handle_role_toggle(interaction: discord.Interaction, role_row_id: int)
             await member.remove_roles(role, reason="interest role toggle")
             msg = f"Removed **{label}**."
         else:
+            if role_rejection_reason(role):
+                await interaction.followup.send(
+                    "This role can't be self-assigned — tell an admin.", ephemeral=True)
+                return
             await member.add_roles(role, reason="interest role toggle")
             msg = f"Added **{label}** — you'll be pinged for new events."
     except discord.Forbidden:

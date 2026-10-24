@@ -579,6 +579,16 @@ async def test_autocomplete_orders_dated_ascending_then_undated(db, cog, interac
         "Alpha undated", "Zed undated"]
 
 
+async def test_autocomplete_label_uses_guild_timezone(db, cog, interaction):
+    # Time-TBC event at local midnight Perth = 16:00 UTC the previous day.
+    _add_event(db, title="TBC Night", starts_at=datetime(2026, 11, 5, 0, 0, tzinfo=TZ))
+    with db() as s:
+        s.add(GuildConfig(guild_id=GUILD, timezone="Australia/Perth"))
+        s.commit()
+    choices = await cog.signups_event_autocomplete(interaction, "")
+    assert [c.name for c in choices] == ["TBC Night — Thu 05 Nov"]
+
+
 async def test_autocomplete_other_guild_does_not_leak(db, cog, interaction):
     _add_event(db, title="Mine", ext="wp:1")
     interaction.guild_id = GUILD + 1
