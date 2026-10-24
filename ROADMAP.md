@@ -80,8 +80,10 @@ Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/sup
 - [x] Task 10: Watched-category alerts (per-slug seeding, real WC Store API prices, flood cap, poison-pill hardening)
 - [x] 4-agent council + fixes (1489 tests green)
 
-## v2 Milestone 8 — Hardening + deploy ⬜
+## v2 Milestone 8 — Hardening + deploy ✅ (complete 2026-10-24)
 
-- [ ] Task 11: Permissions/README/full pass
-- [ ] Final whole-branch review
-- [ ] Fly deploy
+- [x] Task 11: Permissions/README/full pass
+- [x] Final whole-branch review + fix wave (mentionability warning, autocomplete tz, toggle re-vetting; re-reviewed clean; 1495 tests green, 0 warnings)
+- [x] Fly deploy (machine 85e26db44e7968 healthy; all v2 DDL columns + 6 new tables verified in production SQLite)
+
+**Status: COMPLETE — deployed live.** 11/11 tasks, 8 milestone councils, final review clean.
