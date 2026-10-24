@@ -7,15 +7,30 @@ import logging  # noqa: E402
 import discord  # noqa: E402
 from discord.ext import commands  # noqa: E402
 
+from sqlalchemy import select  # noqa: E402
+
 from src import config  # noqa: E402
 from src.db.models import Base  # noqa: E402
 from src.db.session import (  # noqa: E402
     ensure_board_post_message_ids, ensure_guild_config_v2_columns,
     ensure_guild_config_weekly_image_url, ensure_guild_config_weekly_seeded,
-    get_engine,
+    get_engine, get_session_factory,
 )
 
 log = logging.getLogger("hightide")
+
+
+def register_persistent_views(bot: commands.Bot, session_factory) -> None:
+    """Re-attach the roles panel view for every guild that has a posted panel."""
+    from src.db.models import GuildConfig
+    from src.db.repositories import list_interest_roles
+    from src.discord_ui.role_views import RolesPanelView
+    with session_factory() as session:
+        rows = session.execute(
+            select(GuildConfig).where(GuildConfig.roles_message_id.is_not(None))).scalars().all()
+        for cfg in rows:
+            bot.add_view(RolesPanelView(list_interest_roles(session, cfg.guild_id)),
+                         message_id=cfg.roles_message_id)
 
 
 def create_bot() -> commands.Bot:
@@ -37,6 +52,11 @@ def create_bot() -> commands.Bot:
     user_cog = UserCog(bot)
     bot.tree.add_command(user_cog.events_group)
 
+    # Same pattern: RolesCog group lives on the tree, so it is NOT add_cog'd (would double-register).
+    from src.discord_ui.commands_roles import RolesCog
+    roles_cog = RolesCog(bot)
+    bot.tree.add_command(roles_cog.roles_group)
+
     @bot.event
     async def setup_hook() -> None:
         engine = get_engine(config.DATABASE_URL)
@@ -45,6 +65,7 @@ def create_bot() -> commands.Bot:
         ensure_guild_config_weekly_image_url(engine)
         ensure_guild_config_weekly_seeded(engine)
         ensure_guild_config_v2_columns(engine)
+        register_persistent_views(bot, get_session_factory(config.DATABASE_URL))
         from src.services.scheduler import RefreshScheduler
         RefreshScheduler(bot).start()
         if config.GUILD_ID:
