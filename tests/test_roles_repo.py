@@ -47,8 +47,8 @@ def test_keywords_and_ping_once():
 
 def test_guild_isolation():
     s = _session()
-    r1 = add_interest_role(s, 1, 111, "A")
-    r2 = add_interest_role(s, 2, 222, "B")
+    add_interest_role(s, 1, 111, "A")
+    add_interest_role(s, 2, 222, "B")
     assert [x.label for x in list_interest_roles(s, 1)] == ["A"]
     assert [x.label for x in list_interest_roles(s, 2)] == ["B"]
     assert list_interest_roles(s, 1)[0].sort_order == 0
@@ -158,7 +158,7 @@ def test_ensure_guild_config_v2_columns_idempotent_on_legacy_table(tmp_path):
         assert "roles_channel_id" in cols
         assert "roles_message_id" in cols
         assert "announce_channel_id" in cols
-        
+
         # Second call is idempotent (no error)
         ensure_guild_config_v2_columns(engine)
         cols = {c["name"] for c in inspect(engine).get_columns("guild_config")}
