@@ -64,11 +64,11 @@ Plan: `docs/superpowers/plans/2026-10-24-community-features.md`. Spec: `docs/sup
 - [x] Task 6: Signup buttons on week cards + admin list (DynamicItem dispatch)
 - [x] 4-agent council + fixes (name resolution, id guards, restart dispatch; 790 tests green)
 
-## v2 Milestone 5 — Deck + card ⬜
+## v2 Milestone 5 — Deck + card ✅ (complete 2026-10-24)
 
-- [ ] Task 7: `/card` Scryfall lookup
-- [ ] Task 8: `/deck` Moxfield + Archidekt
-- [ ] 4-agent council + fixes
+- [x] Task 7: `/card` Scryfall lookup (fuzzy + exact variants)
+- [x] Task 8: `/deck` Moxfield + Archidekt
+- [x] 4-agent council + fixes (cooldowns, ambiguity handling, timeouts; 1209 tests green)
 
 ## v2 Milestone 6 — Wants board ⬜
 
