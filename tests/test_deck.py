@@ -561,8 +561,8 @@ class TestMoxfieldBlockLogging:
         assert "returned 403" in caplog.text
         assert "test123" in caplog.text
 
-    async def test_archidekt_non_200_does_not_log_warning(self, caplog):
-        """Test that Archidekt 403 does not log a warning (per site-specific policy)."""
+    async def test_archidekt_non_200_logs_warning(self, caplog):
+        """Test that Archidekt 403 logs a warning (consistent policy for both sources)."""
         p, _ = _client(_resp(403, {}))
         try:
             with caplog.at_level(logging.WARNING):
@@ -570,8 +570,8 @@ class TestMoxfieldBlockLogging:
         finally:
             p.stop()
         assert d is None
-        # Archidekt non-200 should not trigger extra logging (unlike Moxfield)
-        assert "returned" not in caplog.text or "archidekt" not in caplog.text.lower()
+        assert "returned 403" in caplog.text
+        assert "1" in caplog.text
 
 
 class TestImageLookupRobustness:
@@ -627,16 +627,16 @@ class TestLengthCaps:
         assert d.commander == "A" * 100
         assert len(d.commander) == 100
 
-    async def test_format_truncated_at_40_chars(self, mox, scry):
-        """Test that format name is capped at 40 characters."""
-        # Set a very long format name that will exceed 40 chars after processing
-        mox["format"] = "very_long_custom_format_name_that_is_definitely_over_forty_characters"
+    async def test_format_truncated_at_30_chars(self, mox, scry):
+        """Test that format name is capped at 30 characters."""
+        # Set a very long format name that will exceed 30 chars after processing
+        mox["format"] = "very_long_custom_format_name_that_is_definitely_over_thirty_characters"
         p, _ = _client(_resp(200, mox), _resp(200, scry))
         try:
             d = await fetch_deck(f"https://moxfield.com/decks/{MOX_ID}")
         finally:
             p.stop()
-        assert len(d.fmt) <= 40
+        assert len(d.fmt) <= 30
 
 
 class TestMoxfieldUrlVariants:
