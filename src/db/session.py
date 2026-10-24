@@ -64,7 +64,8 @@ def ensure_guild_config_v2_columns(engine) -> None:
             if "duplicate column" not in str(exc).lower():
                 raise
             continue
-        log.info(f"added guild_config.{col_name} column")
+        log.info("added guild_config v2 column")
+
 
 
 def get_session_factory(url: str) -> sessionmaker:

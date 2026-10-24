@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from src.db.models import BoardPost, Event, EventRolePing, EventSource, GuildConfig, InterestRole, RoleKeyword
@@ -84,8 +84,9 @@ def save_board_post(session, guild_id, board_type, period_key, channel_id,
 
 def add_interest_role(session: Session, guild_id: int, role_id: int, label: str, emoji: str | None = None) -> InterestRole:
     row = InterestRole(guild_id=guild_id, role_id=role_id, label=label, emoji=emoji)
-    existing = list_interest_roles(session, guild_id)
-    row.sort_order = (max((x.sort_order for x in existing), default=-1) + 1)
+    stmt = select(func.max(InterestRole.sort_order)).where(InterestRole.guild_id == guild_id)
+    max_order = session.execute(stmt).scalar() or -1
+    row.sort_order = max_order + 1
     session.add(row)
     session.commit()
     return row
@@ -95,8 +96,8 @@ def remove_interest_role(session: Session, guild_id: int, row_id: int) -> bool:
     row = session.get(InterestRole, row_id)
     if row is None or row.guild_id != guild_id:
         return False
-    session.query(RoleKeyword).filter(RoleKeyword.interest_role_id == row.id).delete()
-    session.query(EventRolePing).filter(EventRolePing.interest_role_id == row.id).delete()
+    session.execute(delete(RoleKeyword).where(RoleKeyword.interest_role_id == row.id))
+    session.execute(delete(EventRolePing).where(EventRolePing.interest_role_id == row.id))
     session.delete(row)
     session.commit()
     return True
@@ -108,7 +109,10 @@ def list_interest_roles(session: Session, guild_id: int) -> list[InterestRole]:
 
 
 def add_keyword(session: Session, interest_role_id: int, keyword: str) -> RoleKeyword:
-    row = RoleKeyword(interest_role_id=interest_role_id, keyword=keyword.strip().lower())
+    stripped = keyword.strip().lower()
+    if not stripped:
+        raise ValueError("Keyword cannot be empty or whitespace-only")
+    row = RoleKeyword(interest_role_id=interest_role_id, keyword=stripped)
     session.add(row)
     session.commit()
     return row
