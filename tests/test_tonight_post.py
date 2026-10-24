@@ -54,6 +54,26 @@ def test_embed_escapes_title_and_drops_unsafe_url():
     assert "javascript" not in embed.description
     assert "@everyone" not in embed.description.replace("@\u200beveryone", "")
     assert "](http://evil)" not in embed.description
+    assert "\\*b\\*" in embed.description  # bold markers escaped, not rendered
+    assert "@\u200beveryone" in embed.description
+
+
+def test_embed_title_dropped_by_escaping_is_detected():
+    embed = build_tonight_embed([_ev(1, "\u202e\u202d", 10)], PERTH)
+    # The line survives with an empty link text rather than vanishing.
+    assert embed.description == "`10:00` [](https://example.com/1)"
+
+
+def test_embed_same_time_events_tiebreak_by_title():
+    embed = build_tonight_embed([_ev(1, "Zeta", 10), _ev(2, "Alpha", 10)], PERTH)
+    lines = embed.description.split("\n")
+    assert "Alpha" in lines[0] and "Zeta" in lines[1]
+
+
+def test_embed_all_starts_at_none_returns_none():
+    events = [Event(guild_id=GUILD, external_id=f"n{i}", title="TBA", url="u", starts_at=None)
+              for i in range(2)]
+    assert build_tonight_embed(events, PERTH) is None
 
 
 def test_embed_truncates_long_lists_within_limit():
@@ -157,6 +177,22 @@ async def test_channel_unavailable_does_not_set_date(env):
     assert env.cfg.last_daily_post_date is None
 
 
+async def test_day_edge_boundaries(env):
+    events = [_ev(1, "Midnight today", 0, 0), _ev(2, "Last minute", 23, 59),
+              _ev(3, "Next midnight", 0, 0, day=24)]
+    now = datetime(2026, 10, 23, 23, 59, tzinfo=PERTH)
+    assert await _post(env, events, now) is True
+    desc = env.channel.send.await_args.kwargs["embed"].description
+    assert "Last minute" in desc and "Midnight today" in desc
+    assert "Next midnight" not in desc
+    assert env.cfg.last_daily_post_date == "2026-10-23"
+
+
+async def test_next_local_midnight_event_alone_is_not_today(env):
+    assert await _post(env, [_ev(1, "Next midnight", 0, 0, day=24)], NOW) is False
+    env.channel.send.assert_not_awaited()
+
+
 # --- scheduler tick integration ---
 
 class _Clock:
@@ -229,6 +265,179 @@ async def test_tonight_failure_does_not_trigger_backoff(tick_env, monkeypatch, c
     assert inst._last_run_key[GUILD] == "2026-10-23"
 
 
+def _failed_refresh():
+    return {"events": "error:ConnectionError", "this_week": "error:X", "this_month": "error:X"}
+
+
+async def test_retry_after_failed_refresh_posts_exactly_once(tick_env, monkeypatch, clock):
+    refresh = AsyncMock(side_effect=[_failed_refresh(), dict(_OK)])
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", refresh)
+    inst = RefreshScheduler(tick_env.bot)
+
+    await inst.tick.coro(inst)
+    tick_env.channel.send.assert_not_awaited()
+    with tick_env.factory() as s:
+        assert s.get(GuildConfig, GUILD).last_daily_post_date is None
+
+    clock.now = NOW + timedelta(minutes=31)
+    await inst.tick.coro(inst)
+    await inst.tick.coro(inst)
+    assert refresh.await_count == 2
+    tick_env.channel.send.assert_awaited_once()
+    with tick_env.factory() as s:
+        assert s.get(GuildConfig, GUILD).last_daily_post_date == "2026-10-23"
+
+
+async def test_board_error_does_not_suppress_tonight_and_retry_does_not_repost(
+        tick_env, monkeypatch, clock):
+    board_err = {"events": {"added": 1}, "this_week": "error:HTTPException", "this_month": "created"}
+    refresh = AsyncMock(side_effect=[board_err, {"events": "cached", "this_week": "ok",
+                                                 "this_month": "ok"}])
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", refresh)
+    inst = RefreshScheduler(tick_env.bot)
+
+    await inst.tick.coro(inst)
+    tick_env.channel.send.assert_awaited_once()
+    assert board_err["tonight"] == "posted"
+    assert inst._next_attempt[GUILD] is not None  # the board error still drives backoff
+
+    clock.now = NOW + timedelta(minutes=31)
+    await inst.tick.coro(inst)
+    assert refresh.await_count == 2
+    tick_env.channel.send.assert_awaited_once()
+    assert refresh.await_args.kwargs["fetch"] is False
+
+
+async def test_db_guard_blocks_post_on_fresh_scheduler(tick_env, monkeypatch):
+    with tick_env.factory() as s:
+        s.get(GuildConfig, GUILD).last_daily_post_date = "2026-10-23"
+        s.commit()
+    result = dict(_OK)
+    refresh = AsyncMock(return_value=result)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", refresh)
+    inst = RefreshScheduler(tick_env.bot)  # empty in-memory state: only the DB can block
+
+    await inst.tick.coro(inst)
+    refresh.assert_awaited_once()
+    tick_env.channel.send.assert_not_awaited()
+    assert result["tonight"] == "skipped:already_posted"
+
+
+async def test_run_level_guard_second_same_day_run_does_not_post(tick_env, monkeypatch):
+    refresh = AsyncMock(side_effect=lambda *a, **k: dict(_OK))
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", refresh)
+    inst = RefreshScheduler(tick_env.bot)
+
+    await inst.tick.coro(inst)
+    await inst.tick.coro(inst)
+    assert refresh.await_count == 1
+    tick_env.channel.send.assert_awaited_once()
+
+
+async def test_unexpected_tonight_exception_rolls_back_without_backoff(tick_env, monkeypatch):
+    from sqlalchemy.orm import Session
+    result = dict(_OK)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", AsyncMock(return_value=result))
+    real_commit, real_rollback = Session.commit, Session.rollback
+    rollbacks = []
+
+    def commit(self):
+        if any(isinstance(o, GuildConfig) for o in self.dirty):
+            raise RuntimeError("commit failed")
+        return real_commit(self)
+
+    def rollback(self):
+        rollbacks.append(1)
+        return real_rollback(self)
+
+    monkeypatch.setattr(Session, "commit", commit)
+    monkeypatch.setattr(Session, "rollback", rollback)
+    inst = RefreshScheduler(tick_env.bot)
+
+    await inst.tick.coro(inst)
+    assert result["tonight"] == "error:RuntimeError"
+    assert rollbacks
+    assert inst._last_run_key[GUILD] == "2026-10-23"
+    assert inst._next_attempt[GUILD] is None
+    with tick_env.factory() as s:
+        assert s.get(GuildConfig, GUILD).last_daily_post_date is None
+
+
+async def test_failed_send_leaves_date_unset_and_next_day_posts(tick_env, monkeypatch, clock):
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh",
+                        AsyncMock(side_effect=lambda *a, **k: dict(_OK)))
+    with tick_env.factory() as s:
+        s.add(_ev(2, "Tomorrow", 18, day=24))
+        s.commit()
+    tick_env.channel.send.side_effect = discord.Forbidden(MagicMock(status=403, reason="x"), "no")
+    inst = RefreshScheduler(tick_env.bot)
+
+    await inst.tick.coro(inst)
+    with tick_env.factory() as s:
+        assert s.get(GuildConfig, GUILD).last_daily_post_date is None
+
+    tick_env.channel.send.side_effect = None
+    clock.now = NOW + timedelta(days=1)
+    await inst.tick.coro(inst)
+    with tick_env.factory() as s:
+        assert s.get(GuildConfig, GUILD).last_daily_post_date == "2026-10-24"
+    embed = tick_env.channel.send.await_args.kwargs["embed"]
+    assert "Tomorrow" in embed.description and "Chess" not in embed.description
+
+
+async def test_tonight_reads_fresh_config_after_refresh(tick_env, monkeypatch):
+    new_channel = MagicMock()
+    new_channel.send = AsyncMock()
+    channels = {CHANNEL_ID: tick_env.channel, 777: new_channel}
+    tick_env.bot.get_channel.side_effect = channels.get
+
+    async def refresh(*a, **k):
+        # Another session (e.g. /config announce_channel) commits mid-tick.
+        with tick_env.factory() as other:
+            other.get(GuildConfig, GUILD).announce_channel_id = 777
+            other.commit()
+        return dict(_OK)
+
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", refresh)
+    inst = RefreshScheduler(tick_env.bot)
+
+    await inst.tick.coro(inst)
+    new_channel.send.assert_awaited_once()
+    tick_env.channel.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("branch, expected", [
+    ("no_channel", "skipped:no_channel"),
+    ("already_posted", "skipped:already_posted"),
+    ("no_events", "skipped:no_events"),
+    ("posted", "posted"),
+    ("forbidden", "error:Forbidden"),
+    ("channel_unavailable", "error:ChannelUnavailable"),
+])
+async def test_tick_tonight_result_per_branch(tick_env, monkeypatch, branch, expected):
+    with tick_env.factory() as s:
+        cfg = s.get(GuildConfig, GUILD)
+        if branch == "no_channel":
+            cfg.announce_channel_id = None
+        elif branch == "already_posted":
+            cfg.last_daily_post_date = "2026-10-23"
+        elif branch == "no_events":
+            s.query(Event).delete()
+        s.commit()
+    if branch == "forbidden":
+        tick_env.channel.send.side_effect = discord.Forbidden(MagicMock(status=403, reason="x"), "no")
+    elif branch == "channel_unavailable":
+        tick_env.bot.get_channel.return_value = None
+        tick_env.bot.fetch_channel = AsyncMock(
+            side_effect=discord.NotFound(MagicMock(status=404, reason="x"), "gone"))
+    result = dict(_OK)
+    monkeypatch.setattr("src.services.scheduler.run_daily_refresh", AsyncMock(return_value=result))
+    inst = RefreshScheduler(tick_env.bot)
+
+    await inst.tick.coro(inst)
+    assert result["tonight"] == expected
+
+
 # --- config commands ---
 
 @pytest.fixture
@@ -277,6 +486,29 @@ async def test_set_daily_post_time_invalid(db, interaction, value):
     with db() as s:
         assert s.get(GuildConfig, GUILD) is None
     assert "HH:MM" in interaction.response.send_message.call_args.args[0]
+
+
+@pytest.mark.parametrize("value", ["00:00", "23:59"])
+async def test_set_daily_post_time_accepts_range_bounds(db, interaction, value):
+    cog = AdminCog(MagicMock())
+    await cog.set_daily_post_time.callback(cog, interaction, value)
+    with db() as s:
+        assert s.get(GuildConfig, GUILD).daily_post_time == value
+
+
+async def test_set_daily_post_time_overwrites_existing(db, interaction):
+    cog = AdminCog(MagicMock())
+    await cog.set_daily_post_time.callback(cog, interaction, "18:15")
+    await cog.set_daily_post_time.callback(cog, interaction, "07:05")
+    with db() as s:
+        assert s.get(GuildConfig, GUILD).daily_post_time == "07:05"
+
+
+def test_fresh_config_row_defaults_post_time_to_0900(session):
+    session.add(GuildConfig(guild_id=GUILD))
+    session.commit()
+    session.expire_all()
+    assert session.get(GuildConfig, GUILD).daily_post_time == "09:00"
 
 
 def test_daily_post_time_description_documents_v2_behaviour():

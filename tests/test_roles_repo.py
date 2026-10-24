@@ -151,7 +151,7 @@ def test_ensure_guild_config_v2_columns_adds_daily_post_columns_with_default(tmp
         with engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT daily_post_time, last_daily_post_date FROM guild_config")).one()
-        assert tuple(row) == ("09:30", None)
+        assert tuple(row) == ("09:00", None)
     finally:
         engine.dispose()
 
