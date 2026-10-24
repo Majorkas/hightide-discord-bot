@@ -151,6 +151,18 @@ class AdminCog(commands.Cog):
             f"announce channel set to {channel.mention}", ephemeral=True)
 
     @config_group.command(
+        name="wants_channel",
+        description="Channel for the persistent card wants board")
+    async def set_wants_channel(self, interaction: discord.Interaction,
+                                channel: discord.TextChannel) -> None:
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            cfg.wants_channel_id = channel.id
+            session.commit()
+        await interaction.response.send_message(
+            f"wants channel set to {channel.mention}", ephemeral=True)
+
+    @config_group.command(
         name="daily_post_time",
         description="Today-post time (v2: posts at the daily refresh time instead)")
     async def set_daily_post_time(self, interaction: discord.Interaction, hhmm: str) -> None:

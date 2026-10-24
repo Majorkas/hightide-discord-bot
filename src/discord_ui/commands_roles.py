@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
@@ -18,7 +19,7 @@ from src.db.repositories import (
     list_interest_roles, remove_interest_role, remove_keyword,
 )
 from src.db.session import get_session_factory
-from src.discord_ui.embeds import _md_escape
+from src.discord_ui.embeds import _md_escape, build_wants_embed
 from src.discord_ui.role_views import (
     MAX_PANEL_ROLES, RolesPanelView, build_roles_panel_embed,
 )
@@ -26,6 +27,7 @@ from src.services.deck_service import (
     AmbiguousCardError, build_card_embed, build_deck_embed, fetch_deck, parse_deck_url,
     scryfall_card,
 )
+from src.services.want_service import add_want, list_wants, remove_want, update_wants_board
 
 log = logging.getLogger("hightide.discord_ui.commands_roles")
 
@@ -464,3 +466,85 @@ class RolesCog(commands.Cog):
             return
 
         await interaction.response.send_message(embed=build_deck_embed(deck), ephemeral=False)
+
+    want_group = app_commands.Group(
+        name="want", description="Card wants board", guild_only=True)
+
+    @want_group.command(name="add", description="Add a card you're looking for to the wants board")
+    @app_commands.describe(card="Exact card name", note="Optional note, e.g. condition or foil")
+    @app_commands.checks.cooldown(1, _LOOKUP_COOLDOWN_SECONDS, key=lambda i: i.user.id)
+    async def want_add(self, interaction: discord.Interaction, card: str,
+                       note: str | None = None) -> None:
+        await interaction.response.defer(ephemeral=True)
+        with _session() as session:
+            try:
+                want = await add_want(session, interaction.guild_id, interaction.user.id,
+                                      card, note, resolve_timeout=_LOOKUP_TIMEOUT)
+            except ValueError as e:  # validation and per-user cap; messages carry no user text
+                await interaction.followup.send(str(e), ephemeral=True)
+                return
+            shown = f"**{_md_escape(want.card_name)}** (id {want.id})"
+            cfg = get_or_create_config(session, interaction.guild_id)
+            if not cfg.wants_channel_id:
+                msg = (f"Saved your want {shown}, but no wants channel is set yet — "
+                       "an admin can run /config wants_channel.")
+            else:
+                try:
+                    await update_wants_board(self.bot, session, interaction.guild_id)
+                    msg = f"Added to the wants board: {shown}."
+                except Exception:
+                    log.exception("wants board update failed after add")
+                    msg = (f"Saved your want {shown}, but I couldn't update the board — "
+                           "check my permissions in the wants channel.")
+            if want.scryfall_uri is None:
+                msg += " (no Scryfall match — shown as plain text)"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @want_group.command(name="browse", description="See what everyone is looking for")
+    async def want_browse(self, interaction: discord.Interaction) -> None:
+        with _session() as session:
+            cfg = get_or_create_config(session, interaction.guild_id)
+            embed = build_wants_embed(
+                list_wants(session, interaction.guild_id), ZoneInfo(cfg.timezone))
+        await interaction.response.send_message(
+            embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    @want_group.command(name="remove", description="Remove one of your wants (by id from /want list)")
+    async def want_remove(self, interaction: discord.Interaction, want_id: int) -> None:
+        await interaction.response.defer(ephemeral=True)
+        is_admin = interaction.user.guild_permissions.manage_guild
+        with _session() as session:
+            if not remove_want(session, interaction.guild_id, want_id, interaction.user.id,
+                               is_admin):
+                await interaction.followup.send(
+                    f"No want #{want_id} found — you can only remove your own wants "
+                    "(see /want list).", ephemeral=True)
+                return
+            note = ""
+            if get_or_create_config(session, interaction.guild_id).wants_channel_id:
+                try:
+                    await update_wants_board(self.bot, session, interaction.guild_id)
+                except Exception:
+                    log.exception("wants board update failed after remove")
+                    note = " I couldn't update the board — check my permissions."
+        await interaction.followup.send(f"Removed want #{want_id}.{note}", ephemeral=True)
+
+    @want_group.command(name="list", description="List your own wants")
+    async def want_list(self, interaction: discord.Interaction) -> None:
+        with _session() as session:
+            tz = ZoneInfo(get_or_create_config(session, interaction.guild_id).timezone)
+            wants = list_wants(session, interaction.guild_id, interaction.user.id)
+            lines = [
+                f"#{w.id} **{_md_escape(w.card_name)}**"
+                + (f" · {_md_escape(w.note)}" if w.note else "")
+                + f" · {w.created_at.astimezone(tz).strftime('%b %d')}"
+                for w in wants
+            ]
+        if not lines:
+            await interaction.response.send_message(
+                "You have no active wants. Add one with /want add.", ephemeral=True)
+            return
+        text = "\n".join(lines)
+        if len(text) > _MAX_MESSAGE_CHARS:
+            text = text[:_MAX_MESSAGE_CHARS] + "\n…"
+        await interaction.response.send_message(text, ephemeral=True)

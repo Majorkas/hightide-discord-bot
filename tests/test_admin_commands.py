@@ -62,11 +62,11 @@ def _sources(db):
 def test_command_surface():
     bot = create_bot()
     groups = {c.name: c for c in bot.tree.get_commands()}
-    assert set(groups) == {"config", "source", "board", "events", "roles", "card", "deck"}
+    assert set(groups) == {"config", "source", "board", "events", "roles", "card", "deck", "want"}
     assert {c.name for c in groups["config"].commands} == {
         "this_week_channel", "this_month_channel", "timezone",
         "daily_refresh_time", "include_tba", "announce_channel", "daily_post_time",
-        "weekly_list", "weekly_add", "weekly_remove", "weekly_image",
+        "weekly_list", "weekly_add", "weekly_remove", "weekly_image", "wants_channel",
     }
     assert {c.name for c in groups["source"].commands} == {"list", "add", "remove"}
     assert {c.name for c in groups["board"].commands} == {"preview", "refresh", "recreate", "signups"}
@@ -77,6 +77,8 @@ def test_command_surface():
     assert groups["events"].default_permissions is None
     assert groups["card"].default_permissions is None  # /card is public
     assert groups["deck"].default_permissions is None  # /deck is public
+    assert groups["want"].default_permissions is None  # /want is public
+    assert {c.name for c in groups["want"].commands} == {"add", "browse", "remove", "list"}
     assert {c.name for c in groups["events"].commands} == {"upcoming"}
     for g in groups.values():
         assert g.guild_only is True

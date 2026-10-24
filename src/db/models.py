@@ -54,6 +54,7 @@ class GuildConfig(Base):
     daily_post_time: Mapped[str] = mapped_column(String, default="09:00", server_default="09:00")
     # Local (guild tz) YYYY-MM-DD of the last tonight post.
     last_daily_post_date: Mapped[str | None] = mapped_column(String, nullable=True)
+    wants_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class WeeklyRecurring(Base):
@@ -162,3 +163,18 @@ class EventSignup(Base):
     event_id: Mapped[int] = mapped_column(Integer)
     user_id: Mapped[int] = mapped_column(BigInteger)
     signed_up_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+
+
+class CardWant(Base):
+    __tablename__ = "card_wants"
+    # AUTOINCREMENT stops rowid reuse from letting /want remove <id> hit someone else's want.
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    card_name: Mapped[str] = mapped_column(String)
+    scryfall_uri: Mapped[str | None] = mapped_column(String, nullable=True)
+    note: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)

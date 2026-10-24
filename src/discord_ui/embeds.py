@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import discord
 
-from src.db.models import Event, WeeklyRecurring
+from src.db.models import CardWant, Event, WeeklyRecurring
 from src.services.weekly_service import _extract_weekday_index
 
 # Discord embed limits
@@ -197,6 +197,42 @@ def build_event_card(e: Event, tz) -> discord.Embed:
 def _compact_embed(title: str, lines: list[str]) -> discord.Embed:
     text, _ = _truncate_lines(lines, _COMPACT_BUDGET)
     return discord.Embed(title=title, description=text, color=_COLOR)
+
+
+MAX_WANT_LINES = 25
+_WANTS_BUDGET = 4000  # embed description cap is 4096
+
+
+def _want_line(w: CardWant, tz) -> str:
+    name = f"**{_md_escape(w.card_name)}**"
+    safe = _safe_url(w.scryfall_uri)
+    card = f"[{name}]({safe})" if safe else name
+    parts = [f"{card} — <@{w.user_id}>"]
+    if w.note:
+        parts.append(_md_escape(w.note))
+    parts.append(w.created_at.astimezone(tz).strftime("%b %d"))
+    return " · ".join(parts)
+
+
+def build_wants_embed(wants: list[CardWant], tz) -> discord.Embed:
+    """Wants board / browse embed: alphabetical (case-insensitive), capped, user text escaped."""
+    ordered = sorted(wants, key=lambda w: (w.card_name.casefold(), w.id or 0))
+    if not ordered:
+        return discord.Embed(title="Card Wants", description="No active wants.", color=_COLOR)
+    kept: list[str] = []
+    used = 0
+    for w in ordered[:MAX_WANT_LINES]:
+        line = _want_line(w, tz)
+        needed = len(line) + (1 if kept else 0)
+        if used + needed > _WANTS_BUDGET - 20:  # leave room for the "… +N more" footer
+            break
+        kept.append(line)
+        used += needed
+    text = "\n".join(kept)
+    dropped = len(ordered) - len(kept)
+    if dropped:
+        text += f"\n… +{dropped} more" if kept else f"… +{dropped} more"
+    return discord.Embed(title="Card Wants", description=text, color=_COLOR)
 
 
 def _parse_iso_date(value: str | None) -> date | None:

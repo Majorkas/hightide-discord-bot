@@ -67,6 +67,7 @@ def create_bot() -> commands.Bot:
     bot.tree.add_command(roles_cog.roles_group)
     bot.tree.add_command(roles_cog.card_lookup)  # Top-level /card command
     bot.tree.add_command(roles_cog.deck_lookup)  # Top-level /deck command
+    bot.tree.add_command(roles_cog.want_group)  # Public /want group
 
     default_on_error = bot.tree.on_error
 
