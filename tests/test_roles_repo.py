@@ -57,32 +57,39 @@ def test_guild_isolation():
 
 def test_cascade_delete_removes_keywords_and_pings():
     """Verify that removing a role cascades to remove its keywords and pings."""
+    from sqlalchemy import select
     s = _session()
     r = add_interest_role(s, 1, 111, "Test Role")
     add_keyword(s, r.id, "keyword1")
     add_keyword(s, r.id, "keyword2")
     # Create an event and ping it with this role
     record_ping(s, 1, 999, r.id)
-    
+
     # Verify setup
     assert get_keywords_by_role(s, 1)[r.id] == ["keyword1", "keyword2"]
     assert has_ping(s, 999, r.id) is True
-    
+
     # Remove the role and verify cascade
     assert remove_interest_role(s, 1, r.id) is True
-    assert get_keywords_by_role(s, 1) == {}
-    assert has_ping(s, 999, r.id) is False
+
+    # Direct assertions: keywords should be deleted
+    orphan_kw = s.execute(select(RoleKeyword).where(RoleKeyword.interest_role_id == r.id)).scalars().all()
+    assert len(orphan_kw) == 0
+
+    # Direct assertions: pings should be deleted
+    orphan_pings = s.execute(select(EventRolePing).where(EventRolePing.interest_role_id == r.id)).scalars().all()
+    assert len(orphan_pings) == 0
 
 
 def test_remove_interest_role_guild_guard():
     """Verify that remove_interest_role enforces guild isolation."""
     s = _session()
     r1 = add_interest_role(s, 1, 111, "Guild 1 Role")
-    r2 = add_interest_role(s, 2, 222, "Guild 2 Role")
-    
+    add_interest_role(s, 2, 222, "Guild 2 Role")
+
     # Attempt to remove guild 1 role as if it belongs to guild 2
     assert remove_interest_role(s, 2, r1.id) is False
-    
+
     # Role should still exist
     assert len(list_interest_roles(s, 1)) == 1
     assert list_interest_roles(s, 1)[0].id == r1.id
@@ -92,16 +99,31 @@ def test_add_keyword_rejects_empty_input():
     """Verify that add_keyword rejects empty or whitespace-only keywords."""
     s = _session()
     r = add_interest_role(s, 1, 111, "Test Role")
-    
+
     # Empty string should raise ValueError
     with pytest.raises(ValueError):
         add_keyword(s, r.id, "")
-    
+
     # Whitespace-only should raise ValueError
     with pytest.raises(ValueError):
         add_keyword(s, r.id, "   ")
     with pytest.raises(ValueError):
         add_keyword(s, r.id, "\t\n")
+
+
+def test_interest_role_sort_order_increments():
+    """Verify that sort_order increments correctly for multiple roles in same guild."""
+    s = _session()
+    r1 = add_interest_role(s, 1, 111, "First")
+    r2 = add_interest_role(s, 1, 222, "Second")
+    r3 = add_interest_role(s, 1, 333, "Third")
+
+    roles = list_interest_roles(s, 1)
+    assert len(roles) == 3
+    assert roles[0].sort_order == 0
+    assert roles[1].sort_order == 1
+    assert roles[2].sort_order == 2
+    assert [r.label for r in roles] == ["First", "Second", "Third"]
 
 
 _LEGACY_GUILD_CONFIG_DDL = (

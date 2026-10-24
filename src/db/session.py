@@ -67,6 +67,5 @@ def ensure_guild_config_v2_columns(engine) -> None:
         log.info("added guild_config v2 column")
 
 
-
 def get_session_factory(url: str) -> sessionmaker:
     return sessionmaker(bind=get_engine(url), expire_on_commit=False, future=True)

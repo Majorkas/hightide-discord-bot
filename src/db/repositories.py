@@ -85,7 +85,8 @@ def save_board_post(session, guild_id, board_type, period_key, channel_id,
 def add_interest_role(session: Session, guild_id: int, role_id: int, label: str, emoji: str | None = None) -> InterestRole:
     row = InterestRole(guild_id=guild_id, role_id=role_id, label=label, emoji=emoji)
     stmt = select(func.max(InterestRole.sort_order)).where(InterestRole.guild_id == guild_id)
-    max_order = session.execute(stmt).scalar() or -1
+    max_order = session.execute(stmt).scalar()
+    max_order = -1 if max_order is None else max_order
     row.sort_order = max_order + 1
     session.add(row)
     session.commit()
