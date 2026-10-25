@@ -215,8 +215,8 @@ Public: no special permission is needed beyond View Channels and Embed Links (`/
 **`/want list`**
 - Lists your own wants with IDs (ephemeral).
 
-**`/want remove <id>`**
-- Removes one of your wants by ID.
+**`/want remove [id]`**
+- Pick the want to remove from a list of your own active wants (no id needed). Optionally pass an id directly (useful for admins).
 
 **Daily refresh behavior:** the pings, tonight post, wants board and product alerts are best-effort steps that run once per day. A failure in one of them never triggers a same-day retry by itself (only the event fetch and the week/month boards drive retry/backoff), so a missed ping, post or alert waits for the next day's run or a manual `/board refresh`.
 

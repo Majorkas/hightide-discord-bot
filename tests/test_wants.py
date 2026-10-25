@@ -663,6 +663,69 @@ async def test_remove_replies_ephemeral(db, cog):
     assert _sent(i)[1]["ephemeral"] is True
 
 
+async def test_remove_no_id_opens_picker_with_own_wants(db, cog):
+    _configure(db)
+    with db() as s:
+        s.add(_want("Lightning Bolt", BOLT_URI, user=1, set_code="msc", cn="806"))
+        s.add(_want("Not Yours", user=2))
+        s.commit()
+    i = _interaction(user_id=1)
+    await cog.want_remove.callback(cog, i, None)
+    i.response.send_message.assert_awaited_once()
+    kw = i.response.send_message.call_args.kwargs
+    assert kw["ephemeral"] is True
+    view = kw["view"]
+    select = view.children[0]
+    # only the user's own want is listed, labelled with name + printing
+    assert len(select.options) == 1
+    assert select.options[0].label == "Lightning Bolt — MSC #806"
+    i.response.defer.assert_not_awaited()  # picker path doesn't defer
+
+
+async def test_remove_no_id_with_no_wants_says_so(db, cog):
+    _configure(db)
+    i = _interaction(user_id=1)
+    await cog.want_remove.callback(cog, i, None)
+    args, kw = i.response.send_message.call_args
+    assert "no active wants" in args[0].lower() and kw["ephemeral"] is True
+
+
+async def test_remove_picker_selecting_removes_and_updates_board(db, cog):
+    _configure(db)
+    with db() as s:
+        s.add(_want("Lightning Bolt", BOLT_URI, user=1, set_code="msc", cn="806"))
+        s.commit()
+        wid = s.execute(select(CardWant)).scalar_one().id
+    i = _interaction(user_id=1)
+    await cog.want_remove.callback(cog, i, None)
+    view = i.response.send_message.call_args.kwargs["view"]
+
+    sel_i = _interaction(user_id=1)
+    sel_i.data = {"values": [str(wid)]}
+    sel_i.response.defer = AsyncMock()
+    sel_i.edit_original_response = AsyncMock()
+    await view.children[0].callback(sel_i)
+
+    with db() as s:
+        assert s.execute(select(CardWant)).first() is None
+    assert "Removed" in sel_i.followup.send.call_args.args[0]
+    assert "Lightning Bolt" in sel_i.followup.send.call_args.args[0]
+    cog.channel.send.assert_awaited_once()  # board updated
+
+
+async def test_remove_picker_rejects_other_users(db, cog):
+    _configure(db)
+    with db() as s:
+        s.add(_want("Lightning Bolt", user=1))
+        s.commit()
+    i = _interaction(user_id=1)
+    await cog.want_remove.callback(cog, i, None)
+    view = i.response.send_message.call_args.kwargs["view"]
+    stranger = _interaction(user_id=2)
+    assert await view.interaction_check(stranger) is False
+    stranger.response.send_message.assert_awaited_once()
+
+
 async def test_list_shows_only_own_wants(db, cog):
     _configure(db)
     with db() as s:

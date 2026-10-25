@@ -160,6 +160,66 @@ class _PrintingPickerView(discord.ui.View):
         await interaction.followup.send(msg, ephemeral=True)
 
 
+def _want_label(w) -> str:
+    label = w.card_name
+    if w.set_code:
+        cn = f" #{w.collector_number}" if w.collector_number else ""
+        label += f" — {w.set_code.upper()}{cn}"
+    return label
+
+
+class _RemoveWantView(discord.ui.View):
+    """Ephemeral dropdown listing the user's active wants; selecting one removes it."""
+
+    def __init__(self, bot, user_id: int, wants: list, is_admin: bool):
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.user_id = user_id
+        self.is_admin = is_admin
+        self._by_value = {str(w.id): w for w in wants[:25]}
+        options = [
+            discord.SelectOption(label=_want_label(w)[:100], value=str(w.id),
+                                 description=(w.note or "")[:100] or None)
+            for w in wants[:25]
+        ]
+        select = discord.ui.Select(placeholder="Choose a want to remove…", options=options)
+        select.callback = self._on_remove
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This isn't your list — run /want remove yourself.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_remove(self, interaction: discord.Interaction) -> None:
+        raw = interaction.data["values"][0]
+        want = self._by_value.get(raw)
+        want_id = int(raw)
+        await interaction.response.defer(ephemeral=True)
+        with _session() as session:
+            if not remove_want(session, interaction.guild_id, want_id, interaction.user.id,
+                               self.is_admin):
+                await interaction.followup.send(
+                    "That want is already gone.", ephemeral=True)
+                return
+            note = ""
+            if get_or_create_config(session, interaction.guild_id).wants_channel_id:
+                try:
+                    await update_wants_board(self.bot, session, interaction.guild_id)
+                except Exception:
+                    log.exception("wants board update failed after remove")
+                    session.rollback()
+                    note = " I couldn't update the board — check my permissions."
+        for child in self.children:
+            child.disabled = True
+        await interaction.edit_original_response(view=self)
+        name = _md_escape(_want_label(want)) if want else f"#{want_id}"
+        await interaction.followup.send(f"Removed **{name}** from your wants.{note}",
+                                        ephemeral=True)
+
+
 def _session() -> Session:
     global _session_factory
     if _session_factory is None:
@@ -616,11 +676,24 @@ class RolesCog(commands.Cog):
         await interaction.response.send_message(
             embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
-    @want_group.command(name="remove", description="Remove one of your wants (by id from /want list)")
+    @want_group.command(name="remove", description="Remove one of your wants (pick from a list)")
+    @app_commands.describe(want_id="Optional: a specific want id (admins); otherwise pick from a list")
     async def want_remove(self, interaction: discord.Interaction,
-                          want_id: app_commands.Range[int, 1, 2**31 - 1]) -> None:
-        await interaction.response.defer(ephemeral=True)
+                          want_id: app_commands.Range[int, 1, 2**31 - 1] | None = None) -> None:
         is_admin = interaction.user.guild_permissions.manage_guild
+        if want_id is None:
+            with _session() as session:
+                wants = list_wants(session, interaction.guild_id, interaction.user.id)
+            if not wants:
+                await interaction.response.send_message(
+                    "You have no active wants. Add one with /want add.", ephemeral=True)
+                return
+            view = _RemoveWantView(self.bot, interaction.user.id, wants, is_admin)
+            await interaction.response.send_message(
+                "Which want do you want to remove?", view=view, ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
         with _session() as session:
             if not remove_want(session, interaction.guild_id, want_id, interaction.user.id,
                                is_admin):
