@@ -82,7 +82,7 @@ class TestBuildCardEmbed:
         assert embed.url == "https://scryfall.com/card/msc/806/lightning-bolt?utm_source=api"
         assert embed.image.url == card["image_uris"]["normal"]
         assert embed.description == (
-            "**{R}**\nInstant\nLightning Bolt deals 3 damage to any target.\n**USD $0.85**")
+            "**{R}**\nInstant\nLightning Bolt deals 3 damage to any target.")
 
     def test_embed_includes_cost_type_oracle(self, scryfall_card_fixture):
         """Description includes mana cost, type line, and oracle text."""
@@ -94,13 +94,12 @@ class TestBuildCardEmbed:
         assert "Instant" in desc  # type_line
         assert "Lightning Bolt deals 3 damage" in desc  # oracle_text
 
-    def test_embed_includes_price_when_present(self, scryfall_card_fixture):
-        """Description includes USD price when available."""
+    def test_embed_omits_price(self, scryfall_card_fixture):
+        """Scryfall market prices are not shown (USD-only, and the store prices in AUD)."""
         card = scryfall_card_fixture
         embed = build_card_embed(card)
-        desc = embed.description
-
-        assert "**USD $0.85**" in desc
+        assert "USD" not in embed.description
+        assert "$" not in embed.description
 
     def test_embed_without_price(self, scryfall_card_fixture):
         """Embed renders without price when prices.usd is None."""
@@ -765,8 +764,8 @@ class TestCardEmbedEdges:
         url = _get_card_image_url({"image_uris": {"normal": "https://cards.scryfall.io/a b.jpg"}})
         assert url == "https://cards.scryfall.io/a%20b.jpg"
 
-    @pytest.mark.parametrize("usd", ["abc", "", "nan", "inf", "-inf", "1,50", [], {}, "$1.00"])
-    def test_non_numeric_price_is_omitted_not_raised(self, scryfall_card_fixture, usd):
+    @pytest.mark.parametrize("usd", ["abc", "", "nan", "inf", "-inf", "1,50", [], {}, "$1.00", "0.5", 3, "1234.5"])
+    def test_price_is_never_shown(self, scryfall_card_fixture, usd):
         card = self._card(scryfall_card_fixture, prices={"usd": usd})
         desc = build_card_embed(card).description
         assert desc == "**{R}**\nInstant\nLightning Bolt deals 3 damage to any target."
@@ -775,11 +774,6 @@ class TestCardEmbedEdges:
     def test_non_dict_prices_omitted(self, scryfall_card_fixture, prices):
         card = self._card(scryfall_card_fixture, prices=prices)
         assert "USD" not in build_card_embed(card).description
-
-    @pytest.mark.parametrize("usd,shown", [("0.5", "$0.50"), (3, "$3.00"), ("1234.5", "$1234.50"), (0.999, "$1.00")])
-    def test_numeric_prices_formatted(self, scryfall_card_fixture, usd, shown):
-        card = self._card(scryfall_card_fixture, prices={"usd": usd})
-        assert build_card_embed(card).description.endswith(f"\n**USD {shown}**")
 
     def test_dfc_embed_content(self, scryfall_dfc_fixture):
         embed = build_card_embed(scryfall_dfc_fixture)
@@ -790,7 +784,7 @@ class TestCardEmbedEdges:
         lines = embed.description.split("\n")
         assert lines[0] == "**{U}**"
         assert lines[1] == "Creature \u2014 Human Wizard // Creature \u2014 Human Insect"
-        assert lines[-1] == "**USD $0.32**"
+        assert "USD" not in embed.description  # no market price shown
 
     def test_unsafe_scryfall_uri_dropped(self, scryfall_card_fixture):
         card = self._card(scryfall_card_fixture, scryfall_uri="javascript:alert(1)")

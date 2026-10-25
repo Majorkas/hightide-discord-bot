@@ -1,6 +1,5 @@
 """Scryfall card and deck lookup services."""
 import logging
-import math
 import re
 from dataclasses import dataclass
 from time import monotonic as _monotonic
@@ -254,17 +253,6 @@ def build_card_embed(card: dict) -> discord.Embed:
         oracle = "\n".join(_md_escape(line) for line in oracle_text.splitlines())
         oracle = _trim_description_at_boundary(oracle, 400)
         parts.append(oracle)
-
-    # Price
-    prices = card.get("prices")
-    raw_usd = prices.get("usd") if isinstance(prices, dict) else None
-    if raw_usd:
-        try:
-            usd = float(raw_usd)
-        except (ValueError, TypeError):
-            usd = None
-        if usd is not None and math.isfinite(usd):
-            parts.append(f"**USD ${usd:.2f}**")
 
     description = "\n".join(parts)
 

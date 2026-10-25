@@ -54,17 +54,6 @@ _PANEL_FAILED_NOTE = " Discord rejected the panel update — check the role emoj
 _session_factory = None
 
 
-def _usd_price(card: dict) -> str | None:
-    prices = card.get("prices")
-    raw = prices.get("usd") if isinstance(prices, dict) else None
-    if isinstance(raw, str) and raw:
-        try:
-            return f"${float(raw):.2f}"
-        except ValueError:
-            return None
-    return None
-
-
 def _printing_image_url(card: dict) -> str | None:
     uris = card.get("image_uris")
     if isinstance(uris, dict) and isinstance(uris.get("normal"), str) and uris["normal"]:
@@ -80,9 +69,7 @@ def _printing_image_url(card: dict) -> str | None:
 def _printing_option_label(card: dict) -> str:
     set_code = str(card.get("set", "")).upper() or "?"
     cn = str(card.get("collector_number", ""))
-    price = _usd_price(card)
-    label = f"{set_code} #{cn}".strip()
-    return f"{label} · {price}" if price else label
+    return f"{set_code} #{cn}".strip()
 
 
 class _PrintingPickerView(discord.ui.View):
