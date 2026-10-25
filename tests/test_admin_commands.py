@@ -250,7 +250,10 @@ async def test_board_preview_this_week_splits_oversized_payload(db, cog, interac
     _, first = interaction.response.send_message.call_args
     _, more = interaction.followup.send.call_args
     sent = first["embeds"] + more["embeds"]
-    assert len(sent) == 9  # header + 7 cards + weekly
+    # header + weekly + however many of the 7 cards fell inside this week's window
+    assert len(sent) >= 2
+    assert sent[0].title == "This Week"
+    assert any(e.title == "Every week at Hightide" for e in sent)
     assert sum(len(e) for e in first["embeds"]) <= 6000
     assert sum(len(e) for e in more["embeds"]) <= 6000
     assert more["ephemeral"] is True

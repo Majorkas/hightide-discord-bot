@@ -65,3 +65,28 @@ class SignupView(discord.ui.View):
     def __init__(self, event_id: int, count: int = 0):
         super().__init__(timeout=None)
         self.add_item(SignupButton(event_id, count))
+
+
+class NextWeekButton(discord.ui.DynamicItem[discord.ui.Button],
+                     template=r"next_week:"):
+    """'See next week' button on an empty week board; no per-instance state needed."""
+
+    def __init__(self):
+        super().__init__(discord.ui.Button(
+            label="See what's coming next week", emoji="📅",
+            style=discord.ButtonStyle.secondary, custom_id="next_week:"))
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Item,
+                             match) -> "NextWeekButton":
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        from src.services.board_service import build_next_week_preview
+        await build_next_week_preview(interaction)
+
+
+class NextWeekView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(NextWeekButton())

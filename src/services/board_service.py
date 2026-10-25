@@ -12,11 +12,14 @@ from src.db.repositories import (
     get_active_events, get_board_post, get_or_create_config, save_board_post,
 )
 from src.discord_ui.embeds import build_board_embed, build_week_board_items
-from src.discord_ui.role_views import SignupView
+from src.discord_ui.role_views import NextWeekView, SignupView
 from src.services.signup_service import count_signups
 from src.services.weekly_service import get_weekly_rows, seed_weekly_recurring
 
 log = logging.getLogger("hightide.board")
+
+# Session factory seam for the next-week preview (tests monkeypatch this).
+_session_factory = None
 
 
 _board_locks: dict[tuple[int, str], asyncio.Lock] = {}
@@ -74,6 +77,39 @@ def filter_events_for_board(events: list[Event], board_type: str, cfg, tz, *,
         if start <= local < end:
             out.append(e)
     return out
+
+
+def _next_week_window(tz, *, now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Next calendar week: Monday 00:00 to the Monday after (guild tz)."""
+    now = now or datetime.now(tz)
+    this_monday = datetime.combine(now.date() - timedelta(days=now.weekday()), time.min, tzinfo=tz)
+    start = this_monday + timedelta(days=7)
+    return start, start + timedelta(days=7)
+
+
+async def build_next_week_preview(interaction: discord.Interaction) -> None:
+    """Ephemeral list of next week's (Mon–Sun) events, shown only to the clicker."""
+    from src import config
+    from src.db.session import get_session_factory
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = get_session_factory(config.DATABASE_URL)
+    with _session_factory() as session:
+        cfg = get_or_create_config(session, interaction.guild_id)
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(cfg.timezone)
+        now = datetime.now(tz)
+        start, end = _next_week_window(tz, now=now)
+        upcoming = [e for e in get_active_events(session, interaction.guild_id)
+                    if e.starts_at is not None and start <= e.starts_at.astimezone(tz) < end]
+        embed = build_board_embed(upcoming, "Next Week at Hightide", tz,
+                                  cfg.include_tba_section)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True,
+                                        allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
 
 
 def render_board_hash(events: list[Event], board_type: str, cfg, tz) -> str:
@@ -316,11 +352,16 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
               else _weekly_hash(embed) if k == "weekly" else _embed_hash(embed)
               for k, embed in items}
     no_mentions = discord.AllowedMentions.none()
+    # When no dated events remain this week, offer an ephemeral next-week preview.
+    has_dated = any(e.starts_at is not None for e in events)
+    header_view = None if has_dated else NextWeekView()
 
     def _card_kwargs(key: str, embed) -> dict:
         kwargs = {"embed": embed, "allowed_mentions": no_mentions}
         if key in by_id:
             kwargs["view"] = SignupView(by_id[key].id, counts[key])
+        elif key == "header" and header_view is not None:
+            kwargs["view"] = header_view
         return kwargs
 
     stored: dict[str, tuple[int, str | None]] = {}
@@ -339,7 +380,10 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
         # describe a different (now-recreated) card set than the kept header message shows,
         # which froze the header with stale entries; an unconditional edit keeps them in sync.
         try:
-            await header_msg.edit(embed=items[0][1], allowed_mentions=no_mentions)
+            header_kwargs = {"embed": items[0][1], "allowed_mentions": no_mentions}
+            if header_view is not None:
+                header_kwargs["view"] = header_view
+            await header_msg.edit(**header_kwargs)
             changed = True
         except discord.NotFound:
             log.info("board header message missing for this_week, recreating set")
