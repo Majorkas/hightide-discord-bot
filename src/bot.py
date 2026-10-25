@@ -70,6 +70,11 @@ def create_bot() -> commands.Bot:
     bot.tree.add_command(roles_cog.deck_lookup)  # Top-level /deck command
     bot.tree.add_command(roles_cog.want_group)  # Public /want group
 
+    # Decision-tracking admin group (same tree-registration pattern; not add_cog'd).
+    from src.discord_ui.decision_commands import DecisionCog
+    decision_cog = DecisionCog(bot)
+    bot.tree.add_command(decision_cog.decision_group)
+
     default_on_error = bot.tree.on_error
 
     @bot.tree.error
