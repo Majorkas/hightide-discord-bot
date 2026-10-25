@@ -40,11 +40,15 @@ _SYSTEM = (
     "messages in a channel, oldest first, as 'Name: text' lines. The LAST line is the message "
     "being judged; earlier lines are context. A decision is a concrete choice the team has "
     "settled on — including a resolution reached after back-and-forth (e.g. one person says 150, "
-    "another 200, then they agree on 175 — the LAST line confirming it is the decision, and the "
-    "summary must carry the resolved value, e.g. 'Price set at 175'). Casual chat, questions, and "
-    "proposals with no agreement are NOT decisions. Reply with strict JSON only: "
-    '{"is_decision": true|false, "summary": "<=200 char one-line summary of the decision", '
-    '"decider_hint": "who settled it, if clear, else empty"}.'
+    "another 200, then they agree on 175 — the LAST line confirming it is the decision). "
+    "Casual chat, questions, and proposals with no agreement are NOT decisions. "
+    "The summary MUST name both the subject (what was decided about — resolve pronouns like "
+    "'them'/'it' to the thing named earlier, e.g. 'the new deckboxes') AND the settled "
+    "outcome/value. Never write a summary that is just a bare value like 'Price set at 30' — "
+    "always include the subject: 'Price set at 30 for the new deckboxes'. "
+    "Reply with strict JSON only: "
+    '{"is_decision": true|false, "summary": "<=200 char one-line summary naming the subject and '
+    'the outcome", "decider_hint": "who settled it, if clear, else empty"}.'
 )
 
 

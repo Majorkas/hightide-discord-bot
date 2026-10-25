@@ -87,6 +87,20 @@ async def test_detect_returns_parsed_result(monkeypatch):
     assert kwargs["json"]["response_format"] == {"type": "json_object"}
 
 
+async def test_prompt_requires_subject_in_summary(monkeypatch):
+    """The system prompt must instruct the model to name the subject, not a bare value."""
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "key")
+    p, client = _client(_openai_resp('{"is_decision": false, "summary": ""}'))
+    try:
+        await detect_decision(["A: the new deckboxes are cool", "B: yeah okay 30 sounds good"])
+    finally:
+        p.stop()
+    system_prompt = client.post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert "subject" in system_prompt
+    assert "deckboxes" in system_prompt  # the worked example
+    assert "Price set at 30" in system_prompt  # the bare-value anti-pattern is called out
+
+
 async def test_detect_no_key_returns_none(monkeypatch):
     monkeypatch.setattr(config, "OPENAI_API_KEY", "")
     assert await detect_decision("we decided") is None
