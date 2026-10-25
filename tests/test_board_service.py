@@ -61,15 +61,25 @@ def _ev(title, days_ahead, time_known=True, url="https://example.com/event"):
     )
 
 
-def test_week_boundary_today_included():
-    """Event exactly at window start (today 00:00 local) is included."""
+def test_week_boundary_today_start_is_past_and_dropped():
+    """Event exactly at window start (today 00:00 local) has already started, so it's dropped."""
     today_start = datetime.combine(datetime.now(TZ).date(), time.min, tzinfo=TZ)
     event = Event(
         guild_id=1, external_id="wp:boundary", title="boundary",
         url="https://x", starts_at=today_start, time_known=True, is_active=True
     )
+    assert filter_events_for_board([event], "this_week", _cfg(), TZ) == []
+
+
+def test_week_today_later_still_shown():
+    """An event later today (start not yet passed) is still shown."""
+    later = datetime.now(TZ) + timedelta(hours=2)
+    event = Event(
+        guild_id=1, external_id="wp:later", title="later",
+        url="https://x", starts_at=later, time_known=True, is_active=True
+    )
     got = filter_events_for_board([event], "this_week", _cfg(), TZ)
-    assert len(got) == 1 and got[0].title == "boundary"
+    assert len(got) == 1 and got[0].title == "later"
 
 
 def test_week_boundary_day7_excluded():

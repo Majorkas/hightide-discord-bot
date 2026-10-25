@@ -58,6 +58,7 @@ def period_key(board_type: str, tz, *, now: datetime | None = None) -> str:
 
 def filter_events_for_board(events: list[Event], board_type: str, cfg, tz, *,
                             now: datetime | None = None) -> list[Event]:
+    now = now or datetime.now(tz)
     start, end = _window(board_type, cfg, tz, now=now)
     out = []
     for e in events:
@@ -66,6 +67,10 @@ def filter_events_for_board(events: list[Event], board_type: str, cfg, tz, *,
                 out.append(e)
             continue
         local = e.starts_at.astimezone(tz)
+        # Drop events whose start has already passed; the shop feed keeps listing
+        # them, so without this a finished event would linger on the board.
+        if local < now:
+            continue
         if start <= local < end:
             out.append(e)
     return out

@@ -216,7 +216,7 @@ async def test_board_preview(db, cog, interaction):
             external_id="wp:test",
             title="Test Event",
             url="https://example.com",
-            starts_at=datetime.now(tz) + timedelta(days=1),
+            starts_at=datetime.now(tz) + timedelta(hours=2),
             time_known=True,
             is_active=True,
         )
@@ -230,7 +230,9 @@ async def test_board_preview(db, cog, interaction):
     assert isinstance(kwargs["embeds"], list) and kwargs["embeds"]
     assert all(isinstance(e, discord.Embed) for e in kwargs["embeds"])
     assert kwargs["embeds"][0].title == "This Week"
-    assert kwargs["embeds"][1].title == "Test Event"
+    titles = [e.title for e in kwargs["embeds"]]
+    assert "Test Event" in titles
+    assert "Every week at Hightide" in titles  # seeded weekly section
 
 
 async def test_board_preview_this_week_splits_oversized_payload(db, cog, interaction):
