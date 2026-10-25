@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 
 import httpx
+import discord
 from sqlalchemy.orm import Session
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -14,6 +15,18 @@ from src.db.repositories import (
 )
 
 log = logging.getLogger("hightide.decisions")
+
+# Session factory seam (tests monkeypatch this).
+_session_factory = None
+
+
+def _session():
+    global _session_factory
+    if _session_factory is None:
+        from src.db.session import get_session_factory
+        _session_factory = get_session_factory(config.DATABASE_URL)
+    return _session_factory()
+
 
 OPENAI_API = "https://api.openai.com/v1/chat/completions"
 MODEL = "gpt-4o-mini"
@@ -127,3 +140,87 @@ def pending_decisions(session: Session, guild_id: int) -> list[Decision]:
 
 def unsynced_confirmed(session: Session, guild_id: int) -> list[Decision]:
     return get_confirmed_unsynced_decisions(session, guild_id)
+
+
+def message_link(guild_id: int, channel_id: int, message_id: int) -> str:
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+async def sync_decision_to_trello(session: Session, decision: Decision, *,
+                                  decider_name: str, channel_name: str) -> bool:
+    """Create the Trello card for a confirmed decision and record the sync.
+
+    Returns True on success; False (logged, no exception) when Trello is unconfigured
+    or the create fails. Idempotent: an existing sync row short-circuits.
+    """
+    from src.db.repositories import (
+        get_or_create_decision_config, get_trello_member, get_trello_sync,
+        record_trello_sync,
+    )
+    from src.services import trello_service
+    from zoneinfo import ZoneInfo
+
+    if get_trello_sync(session, decision.id) is not None:
+        return True  # already synced
+    cfg = get_or_create_decision_config(session, decision.guild_id)
+    if not (cfg.enabled and cfg.trello_list_id):
+        log.info("decision %s not synced: trello not configured/enabled", decision.id)
+        return False
+    when = decision.created_at.astimezone(ZoneInfo("Australia/Perth")).strftime("%b %d %Y, %I:%M %p")
+    desc = trello_service.build_card_description(
+        decider_name=decider_name, when=when, channel_name=channel_name,
+        message_url=message_link(decision.guild_id, decision.channel_id, decision.message_id),
+        excerpt=decision.content)
+    member = get_trello_member(session, decision.guild_id, decision.user_id)
+    card = await trello_service.create_card(cfg.trello_list_id, decision.summary, desc,
+                                            member_id=member)
+    if card is None:
+        return False
+    record_trello_sync(session, decision.id, card.card_id, card.url)
+    return True
+
+
+async def handle_decision_action(interaction, action: str, decision_id: int) -> None:
+    """Confirm/Dismiss callback: resolve the decision, sync to Trello on confirm,
+    and edit the card to reflect the outcome."""
+    from src.discord_ui.decision_views import _esc
+
+    await interaction.response.defer()
+    with _session() as session:
+        if action == "confirm":
+            d = confirm_decision(session, interaction.guild_id, decision_id,
+                                 confirmed_by=interaction.user.id)
+            if d is None:
+                await interaction.followup.send(
+                    "That decision is no longer pending.", ephemeral=True)
+                return
+            member = interaction.guild.get_member(d.user_id) if interaction.guild else None
+            decider_name = (member.display_name if member else f"User {d.user_id}")
+            channel = interaction.guild.get_channel(d.channel_id) if interaction.guild else None
+            channel_name = f"#{channel.name}" if channel else "a staff channel"
+            synced = await sync_decision_to_trello(
+                session, d, decider_name=decider_name, channel_name=channel_name)
+            status_note = " and synced to Trello" if synced else (
+                " — Trello sync failed or isn't configured (an admin can retry with /decision sync)")
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            new_embed = None
+            if embed is not None:
+                new_embed = discord.Embed(title="Decision confirmed",
+                                          description=embed.description, color=0x1F8B4C)
+            await interaction.edit_original_response(
+                embed=new_embed, view=None)
+            await interaction.followup.send(
+                f"Decision confirmed{status_note}.", ephemeral=True)
+        else:  # dismiss
+            d = dismiss_decision(session, interaction.guild_id, decision_id)
+            if d is None:
+                await interaction.followup.send(
+                    "That decision is no longer pending.", ephemeral=True)
+                return
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            new_embed = None
+            if embed is not None:
+                new_embed = discord.Embed(title="Decision dismissed",
+                                          description=embed.description, color=0x95A5A6)
+            await interaction.edit_original_response(embed=new_embed, view=None)
+            await interaction.followup.send("Dismissed.", ephemeral=True)
