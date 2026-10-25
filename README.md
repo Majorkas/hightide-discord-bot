@@ -21,6 +21,17 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
 - **Product alerts**: Products newly added to the shop (its New In page) post once each to the new-stock channel; event tickets and consumables (snacks, soft drinks) are excluded. The watch seeds silently the first time it runs
 - **Preorders board**: A persistent channel shows every current preorder as a full image card, updating automatically as preorders are added or removed
 
+### Decision tracking (optional second bot)
+
+A separate Discord bot (same process) can watch staff channels for decisions and sync them to Trello. It needs its **own** Discord application with the **Message Content intent** enabled, plus OpenAI and Trello credentials (see `.env.example`).
+
+- AI (GPT-4o-mini) detects decisions in admin-monitored channels and posts a Confirm/Dismiss card.
+- Staff confirm → a Trello card is created (summary, decider, timestamp, channel, message link, auto-assigned mapped member).
+- **`/decision monitor <#channel>` / `unmonitor <#channel>`** — choose watched channels.
+- **`/decision config on|off`** and **`/decision config board <board_id> <list_id>`** — enable and set the Trello target.
+- **`/decision map <@user> <trello_member_id>` / `unmap <@user>`** — Discord→Trello member assignment.
+- **`/decision list [status]`**, **`/decision create <summary>`**, **`/decision sync`** (retry unsynced).
+
 ## Setup
 
 ### Requirements
