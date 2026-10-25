@@ -11,4 +11,6 @@ RUN pip install --no-cache-dir .
 # so `pip show hightide-discord-bot` will not list modules.
 COPY src/ ./src/
 
-CMD ["python", "-m", "src.bot"]
+# The launcher runs the events bot and (when DECISION_BOT_TOKEN is set) the
+# decision bot in the same process.
+CMD ["python", "-m", "src"]
