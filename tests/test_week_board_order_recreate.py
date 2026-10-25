@@ -275,7 +275,7 @@ async def test_unchanged_board_skipped(session):
     channel.deleted.clear()
     
     result2 = await upsert_board(bot, session, GUILD, "this_week")
-    assert result2 == "skipped"
+    assert result2 == "edited"  # header re-syncs each run
     assert len(channel.sends) == 0
     assert len(channel.deleted) == 0
 

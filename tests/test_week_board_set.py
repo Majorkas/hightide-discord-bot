@@ -125,10 +125,13 @@ async def test_identical_second_run_skipped_fetches_header_only(session):
     header_id = get_board_post(session, GUILD, "this_week").message_id
     channel.sends.clear()
 
-    assert await upsert_board(bot, session, GUILD, "this_week") == "skipped"
+    assert await upsert_board(bot, session, GUILD, "this_week") == "edited"
     assert channel.fetches == [header_id]
     assert channel.sends == []
-    assert all(m.edits == [] for m in channel.messages.values())
+    # only the header is edited (re-synced); cards untouched
+    header_msg = channel.messages[header_id]
+    assert len(header_msg.edits) == 1
+    assert all(m.edits == [] for m in channel.messages.values() if m.id != header_id)
 
 
 async def test_price_change_edits_only_that_card(session):
@@ -142,11 +145,13 @@ async def test_price_change_edits_only_that_card(session):
     assert await upsert_board(bot, session, GUILD, "this_week") == "edited"
     post = get_board_post(session, GUILD, "this_week")
     edited = [m.id for m in channel.messages.values() if m.edits]
-    assert edited == [json.loads(post.message_ids)[1]]
-    assert "$99" in channel.messages[edited[0]].embed.description
+    # header (always) plus the changed card
+    card_id = json.loads(post.message_ids)[1]
+    assert set(edited) == {post.message_id, card_id}
+    assert "$99" in channel.messages[card_id].embed.description
     assert channel.sends[4:] == []
     assert channel.deleted == []
-    assert channel.messages[edited[0]].edits[0]["allowed_mentions"].roles is False
+    assert channel.messages[card_id].edits[0]["allowed_mentions"].roles is False
 
 
 async def test_removed_event_message_deleted(session):
@@ -199,6 +204,31 @@ async def test_new_event_mid_week_sends_one_message_others_untouched(session):
     
     # Should have sent fresh complete set
     assert len(channel.sends) == 5  # header + 4 cards
+
+
+async def test_header_resyncs_after_card_set_recreate(session):
+    """Regression: a past event dropping off must refresh the header skim too.
+
+    The card-set recreate keeps the header message; without an unconditional header
+    edit, the header's skim stayed frozen with the dropped event while the cards
+    (correctly) no longer showed it."""
+    _seed(session, names=("a", "b"))
+    channel = FakeChannel()
+    bot = _bot(channel)
+    await upsert_board(bot, session, GUILD, "this_week")
+    header_id = get_board_post(session, GUILD, "this_week").message_id
+    # Header skim lists both events
+    assert "a" in channel.messages[header_id].embed.description
+    assert "b" in channel.messages[header_id].embed.description
+
+    # Event b becomes past/inactive -> drops off the board entirely
+    session.query(Event).filter_by(external_id="wp:b").one().is_active = False
+    session.commit()
+
+    await upsert_board(bot, session, GUILD, "this_week")
+    header_desc = channel.messages[header_id].embed.description
+    assert "a" in header_desc
+    assert "b" not in header_desc  # dropped from the header skim, not just the cards
 
 
 async def test_header_not_found_recreates_whole_set(session):
@@ -370,7 +400,7 @@ async def test_concurrent_week_upserts_serialised(session):
     bot = _bot(channel)
     results = await asyncio.gather(upsert_board(bot, session, GUILD, "this_week"),
                                    upsert_board(bot, session, GUILD, "this_week"))
-    assert sorted(results) == ["created", "skipped"]
+    assert sorted(results) == ["created", "edited"]
     assert len(channel.messages) == 4
 
 

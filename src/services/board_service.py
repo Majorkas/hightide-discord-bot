@@ -334,8 +334,10 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
             log.info("board header message missing for this_week, recreating set")
 
     changed = False
-    if header_msg is not None and (stored["header"][1] != hashes["header"]
-                                   or post.period_key != period):
+    if header_msg is not None:
+        # Always re-edit the header so its skim matches the current set. The stored hash can
+        # describe a different (now-recreated) card set than the kept header message shows,
+        # which froze the header with stale entries; an unconditional edit keeps them in sync.
         try:
             await header_msg.edit(embed=items[0][1], allowed_mentions=no_mentions)
             changed = True

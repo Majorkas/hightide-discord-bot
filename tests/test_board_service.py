@@ -224,12 +224,12 @@ async def test_upsert_board_identical_skipped(session):
     result1 = await upsert_board(bot, session, 999, "this_week")
     assert result1 == "created"
 
-    # Second run with same events
+    # Second run with same events: header re-edits to stay in sync, so 'edited'
     result2 = await upsert_board(bot, session, 999, "this_week")
-    assert result2 == "skipped"
+    assert result2 == "edited"
     channel.fetch_message.assert_called_with(555)
-    msg.edit.assert_not_awaited()
-    assert channel.send.await_count == 2
+    msg.edit.assert_awaited()  # header re-synced
+    assert channel.send.await_count == 2  # no new sends
 
 
 @pytest.mark.asyncio

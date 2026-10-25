@@ -342,7 +342,7 @@ async def test_count_change_refreshes_card_on_next_edit(session):
     channel = _Channel()
     bot = _board_bot(channel)
     await upsert_board(bot, session, GUILD, "this_week")
-    assert await upsert_board(bot, session, GUILD, "this_week") == "skipped"
+    assert await upsert_board(bot, session, GUILD, "this_week") == "edited"  # header re-sync
 
     toggle_signup(session, GUILD, event.id, 7)
     assert await upsert_board(bot, session, GUILD, "this_week") == "edited"
@@ -350,7 +350,7 @@ async def test_count_change_refreshes_card_on_next_edit(session):
     post = get_board_post(session, GUILD, "this_week")
     card = channel.messages[json.loads(post.message_ids)[0]]
     assert card.edits[-1]["view"].children[0].label == "✅ Going (1)"
-    assert await upsert_board(bot, session, GUILD, "this_week") == "skipped"
+    assert await upsert_board(bot, session, GUILD, "this_week") == "edited"  # header re-sync
 
 
 # ---- council batch: restart dispatch ----

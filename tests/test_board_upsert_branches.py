@@ -280,7 +280,7 @@ async def test_concurrent_upserts_serialised_by_lock(session):
         upsert_board(bot, session, GUILD, "this_week"),
     )
 
-    assert sorted(results) == ["created", "skipped"]
+    assert sorted(results) == ["created", "edited"]
     assert channel.send.await_count == 2
 
 

@@ -339,14 +339,15 @@ async def test_image_change_edits_weekly_in_place(session):
 
 async def test_unchanged_weekly_skipped(session):
     bot, channel = await _created_board(session, image=IMG, tba=True)
-    assert await upsert_board(bot, session, GUILD, "this_week") == "skipped"
+    # header re-syncs each run, so this is 'edited'; weekly/cards unchanged
+    assert await upsert_board(bot, session, GUILD, "this_week") == "edited"
     assert channel.sends == [] and channel.deleted == []
 
 
 async def test_expired_row_drops_off_via_edit(session):
     bot, channel = await _created_board(session)
     _add_rows(session, _row("Gone", sort=1, ends_on="2020-01-01"))
-    assert await upsert_board(bot, session, GUILD, "this_week") == "skipped"
+    assert await upsert_board(bot, session, GUILD, "this_week") == "edited"
     assert "Gone" not in _weekly_msg(session, channel).embed.description
 
 
