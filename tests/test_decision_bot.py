@@ -117,6 +117,32 @@ async def test_recent_context_falls_back_to_current_when_history_fails(db, monke
     assert captured and captured[0][-1].endswith("the thing today for sure")
 
 
+async def test_short_agreement_still_detected(db, monkeypatch):
+    """A short agreement ('yes $90 is good') must reach the AI, not be length-filtered."""
+    _enabled(db)
+    monkeypatch.setattr(decision_service, "detect_decision",
+                        AsyncMock(return_value=decision_service.DetectionResult(
+                            True, "Price set at $90", "")))
+    m = _message("yes $90 is good")  # 14 chars — under the old 25 floor
+    await _maybe_detect(_client(), m)
+    m.channel.send.assert_awaited_once()
+
+
+async def test_second_decision_while_one_pending_is_suppressed(db, monkeypatch):
+    """A back-and-forth that resolves over several messages posts one card, not two."""
+    _enabled(db)
+    monkeypatch.setattr(decision_service, "detect_decision",
+                        AsyncMock(return_value=decision_service.DetectionResult(
+                            True, "Price set at $90", "")))
+    m1 = _message("yes $90 is good")
+    await _maybe_detect(_client(), m1)
+    assert m1.channel.send.await_count == 1
+    # a follow-up agreement in the same channel while the first is still pending
+    m2 = _message("so we agree $90 then, locked in")
+    await _maybe_detect(_client(), m2)
+    m2.channel.send.assert_not_awaited()  # no duplicate card
+
+
 async def test_detects_decision_in_monitored_channel(db, monkeypatch):
     _enabled(db)
     monkeypatch.setattr(decision_service, "detect_decision",
@@ -238,8 +264,10 @@ async def test_decision_bot_registers_decision_action_in_setup_hook(tmp_path, mo
     engine.dispose()
 
 
-def test_min_message_chars_is_reasonable():
-    assert 10 <= MIN_MESSAGE_CHARS <= 100
+def test_min_message_chars_admits_short_agreements():
+    # Short agreements must reach the AI; only content-free chatter is skipped.
+    assert MIN_MESSAGE_CHARS <= len("yes $90 is good")
+    assert MIN_MESSAGE_CHARS >= len("ok")  # "ok" alone is still skipped
 
 
 async def test_empty_summary_falls_back_to_excerpt(db, monkeypatch):
@@ -255,14 +283,13 @@ async def test_empty_summary_falls_back_to_excerpt(db, monkeypatch):
 
 async def test_throttle_caps_detections_per_channel(db, monkeypatch):
     _enabled(db)
-    monkeypatch.setattr(decision_service, "detect_decision",
-                        AsyncMock(return_value=decision_service.DetectionResult(True, "X", "")))
+    # throttle the AI call directly so the pending-dedupe (separate concern) can't mask it
+    detect = AsyncMock(return_value=decision_service.DetectionResult(False, "", ""))
+    monkeypatch.setattr(decision_service, "detect_decision", detect)
     decision_bot._channel_windows.clear()
     msg = "we decided something important here today"
-    sent = 0
     for _ in range(decision_bot._MAX_DETECTIONS_PER_MINUTE + 3):
-        m = _message(msg)
-        await _maybe_detect(_client(), m)
-        sent += m.channel.send.await_count
-    assert sent == decision_bot._MAX_DETECTIONS_PER_MINUTE  # capped
+        await _maybe_detect(_client(), _message(msg))
+    # AI was consulted only up to the per-minute cap; the rest were throttled first
+    assert detect.await_count == decision_bot._MAX_DETECTIONS_PER_MINUTE
     decision_bot._channel_windows.clear()

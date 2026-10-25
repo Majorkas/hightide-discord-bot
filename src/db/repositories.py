@@ -244,6 +244,14 @@ def list_decisions(session: Session, guild_id: int, status: str | None = None) -
     return list(session.execute(stmt).scalars())
 
 
+def has_pending_decision_in_channel(session: Session, guild_id: int, channel_id: int) -> bool:
+    """True when the channel has an unresolved (pending) decision awaiting confirm/dismiss."""
+    stmt = select(func.count()).select_from(Decision).where(
+        Decision.guild_id == guild_id, Decision.channel_id == channel_id,
+        Decision.status == "pending")
+    return session.execute(stmt).scalar_one() > 0
+
+
 def get_confirmed_unsynced_decisions(session: Session, guild_id: int) -> list[Decision]:
     """Confirmed decisions with no trello_sync row yet."""
     synced = select(TrelloSync.decision_id)

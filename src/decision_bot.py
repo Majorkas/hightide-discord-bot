@@ -11,7 +11,9 @@ from src import config
 
 log = logging.getLogger("hightide.decision_bot")
 
-MIN_MESSAGE_CHARS = 25  # ignore very short messages ("ok", "lol") — no decision there
+# Lower than you'd think: short agreements ("yes $90 is good", "deal") are exactly where
+# decisions settle, and they must reach the AI. Only truly content-free chatter is skipped.
+MIN_MESSAGE_CHARS = 8
 # Per-channel detection throttle: a spammer can't drive unbounded OpenAI spend.
 _MAX_DETECTIONS_PER_MINUTE = 6
 _channel_windows: dict[int, list[float]] = {}
@@ -99,7 +101,10 @@ async def _maybe_detect(client: discord.Client, message: discord.Message) -> Non
         log.info("decision detection throttled in channel %s", message.channel.id)
         return
 
-    from src.db.repositories import get_or_create_decision_config, list_decision_channels
+    from src.db.repositories import (
+        get_or_create_decision_config, has_pending_decision_in_channel,
+        list_decision_channels,
+    )
     from src.services import decision_service
 
     with decision_service._session() as session:
@@ -107,6 +112,10 @@ async def _maybe_detect(client: discord.Client, message: discord.Message) -> Non
         if not cfg.enabled:
             return
         if message.channel.id not in list_decision_channels(session, message.guild.id):
+            return
+        # One pending card per channel: a back-and-forth resolving over several messages
+        # shouldn't stack duplicate confirmation cards for the same decision.
+        if has_pending_decision_in_channel(session, message.guild.id, message.channel.id):
             return
 
     # Pull recent history so a back-and-forth agreement ("ok, 175 it is") is judged
