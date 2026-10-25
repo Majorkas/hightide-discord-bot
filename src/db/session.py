@@ -72,5 +72,18 @@ def ensure_guild_config_v2_columns(engine) -> None:
         log.info("added guild_config v2 column")
 
 
+def ensure_card_wants_printing_columns(engine) -> None:
+    """Add the printing columns (set/collector/image) to pre-existing card_wants tables."""
+    for col_name in ("set_code", "collector_number", "image_url"):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE card_wants ADD COLUMN {col_name} VARCHAR"))
+        except OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+            continue
+        log.info("added card_wants.%s column", col_name)
+
+
 def get_session_factory(url: str) -> sessionmaker:
     return sessionmaker(bind=get_engine(url), expire_on_commit=False, future=True)

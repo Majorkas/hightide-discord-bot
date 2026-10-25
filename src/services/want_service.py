@@ -1,8 +1,6 @@
-import asyncio
 import hashlib
 import logging
 import re
-from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -14,7 +12,6 @@ from src.db.models import CardWant
 from src.db.repositories import get_board_post, get_or_create_config, save_board_post
 from src.discord_ui.embeds import _safe_url, build_wants_embed, want_sort_key
 from src.services.board_service import _get_board_lock
-from src.services.deck_service import scryfall_card_exact
 
 log = logging.getLogger("hightide.wants")
 
@@ -22,10 +19,7 @@ MAX_CARD_NAME_LEN = 200
 MAX_NOTE_LEN = 120
 MAX_ACTIVE_PER_USER = 10
 EXPIRY_DAYS = 30
-DEFAULT_RESOLVE_TIMEOUT = 2.6  # wait_for cap; the HTTP timeout sits just below it
-_HTTP_TIMEOUT_MARGIN = 0.1
 BOARD_TYPE = "wants"
-_SCRYFALL_HOST = "scryfall.com"
 # Zero-width/bidi controls and markdown chars that can make a name render as nothing.
 _INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069*_`~|]")
 
@@ -41,64 +35,64 @@ def _active_count(session: Session, guild_id: int, user_id: int) -> int:
             CardWant.active.is_(True))).scalar_one()
 
 
-async def _resolve_uri(card_name: str, timeout: float) -> str | None:
-    """Best-effort exact Scryfall lookup; any failure or miss yields None."""
-    try:
-        card = await asyncio.wait_for(
-            scryfall_card_exact(card_name, retries=False,
-                                timeout=max(timeout - _HTTP_TIMEOUT_MARGIN, 0.01)),
-            timeout=timeout)
-    except asyncio.TimeoutError:
-        log.info("wants: scryfall resolve timed out for %r", card_name)
-        return None
-    except Exception as exc:
-        log.warning("wants: scryfall resolve failed for %r: %r", card_name, exc)
-        return None
-    uri = card.get("scryfall_uri") if isinstance(card, dict) else None
-    if not isinstance(uri, str) or not _safe_url(uri):
-        return None
-    try:
-        host = (urlparse(uri).hostname or "").lower()
-    except ValueError:
-        return None
-    if host != _SCRYFALL_HOST and not host.endswith("." + _SCRYFALL_HOST):
-        return None
-    return uri
-
-
-async def add_want(session: Session, guild_id: int, user_id: int, card_name: str,
-                   note: str | None = None, *, now: datetime | None = None,
-                   resolve_timeout: float = DEFAULT_RESOLVE_TIMEOUT) -> CardWant:
-    """Insert a want; resolution is best-effort and never blocks the add."""
-    now = now or datetime.now(timezone.utc)
-    card_name = (card_name or "").strip()
+def _clean_note(note: str | None) -> str | None:
     note = (note or "").strip() or None
-    if not card_name:
-        raise ValueError("Give me a card name.")
-    if not _INVISIBLE.sub("", card_name).strip():
-        raise ValueError("That card name has nothing visible in it — give me a real card name.")
-    if "://" in card_name or (note is not None and "://" in note):
-        raise ValueError("Links aren't allowed in card names/notes.")
-    if len(card_name) > MAX_CARD_NAME_LEN:
-        raise ValueError(f"Card name must be at most {MAX_CARD_NAME_LEN} characters.")
-    if note is not None and len(note) > MAX_NOTE_LEN:
-        raise ValueError(f"Note must be at most {MAX_NOTE_LEN} characters.")
+    if note is not None:
+        if "://" in note:
+            raise ValueError("Links aren't allowed in notes.")
+        if len(note) > MAX_NOTE_LEN:
+            raise ValueError(f"Note must be at most {MAX_NOTE_LEN} characters.")
+    return note
+
+
+def add_want_from_printing(session: Session, guild_id: int, user_id: int,
+                           card: dict, note: str | None = None,
+                           *, now: datetime | None = None) -> CardWant:
+    """Insert a want from a chosen Scryfall printing (card dict from the printings search).
+
+    The name/link/set/image all come from Scryfall, never from free text.
+    """
+    now = now or datetime.now(timezone.utc)
+    note = _clean_note(note)
+
+    name = card.get("name")
+    uri = card.get("scryfall_uri")
+    set_code = card.get("set")
+    cn = card.get("collector_number")
+    if not (isinstance(name, str) and name.strip()):
+        raise ValueError("That card has no name — pick a printing from the list.")
+    if not (isinstance(uri, str) and _safe_url(uri)):
+        raise ValueError("That card has no Scryfall link — pick a printing from the list.")
+    card_name = name.strip()[:MAX_CARD_NAME_LEN]
+    image = _printing_image(card)
 
     expire_wants(session, guild_id, now)
     limit_msg = f"You already have {MAX_ACTIVE_PER_USER} active wants — remove one first."
     if _active_count(session, guild_id, user_id) >= MAX_ACTIVE_PER_USER:
         raise WantLimitError(limit_msg)
-
-    uri = await _resolve_uri(card_name, resolve_timeout)
-
-    # Re-check: a concurrent add may have landed while we awaited Scryfall.
-    if _active_count(session, guild_id, user_id) >= MAX_ACTIVE_PER_USER:
-        raise WantLimitError(limit_msg)
     want = CardWant(guild_id=guild_id, user_id=user_id, card_name=card_name,
-                    scryfall_uri=uri, note=note, created_at=now, active=True)
+                    scryfall_uri=uri,
+                    set_code=set_code if isinstance(set_code, str) else None,
+                    collector_number=cn if isinstance(cn, str) else None,
+                    image_url=image, note=note, created_at=now, active=True)
     session.add(want)
     session.commit()
     return want
+
+
+def _printing_image(card: dict) -> str | None:
+    """Best image URL for a printing: normal, falling back to the front face of a DFC."""
+    uris = card.get("image_uris")
+    if isinstance(uris, dict) and isinstance(uris.get("normal"), str) and uris["normal"]:
+        url = _safe_url(uris["normal"])
+        if url:
+            return url
+    faces = card.get("card_faces")
+    if isinstance(faces, list) and faces and isinstance(faces[0], dict):
+        furis = faces[0].get("image_uris")
+        if isinstance(furis, dict) and isinstance(furis.get("normal"), str):
+            return _safe_url(furis["normal"])
+    return None
 
 
 def remove_want(session: Session, guild_id: int, want_id: int, user_id: int,

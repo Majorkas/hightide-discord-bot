@@ -126,6 +126,64 @@ async def scryfall_card_by_id(sfid: str, *, retries: bool = True, timeout: float
         return None
 
 
+async def scryfall_autocomplete(query: str, *, timeout: float = 2.0) -> list[str]:
+    """Card-name suggestions for a partial query; [] on any failure or >20 (Discord's cap)."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{SCRYFALL_API}/cards/autocomplete",
+                                    params={"q": query}, headers=UA, timeout=timeout)
+            if resp.status_code != 200:
+                return []
+            data = resp.json().get("data")
+    except (httpx.HTTPError, ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [s for s in data if isinstance(s, str)][:20]
+
+
+async def scryfall_printings(card_name: str, *, timeout: float = 15.0) -> list[dict]:
+    """All printings of an exact card name, oldest-first; [] on no match / failure."""
+    q = f'!"{card_name}" unique:prints'
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{SCRYFALL_API}/cards/search",
+                                    params={"q": q, "order": "released", "dir": "asc"},
+                                    headers=UA, timeout=timeout)
+            if resp.status_code != 200:
+                return []
+            data = resp.json().get("data")
+    except (httpx.HTTPError, ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [c for c in data if isinstance(c, dict)]
+
+
+async def scryfall_card_by_set_cn(set_code: str, cn: str, *, timeout: float = 15.0) -> dict | None:
+    """A single printing by set code + collector number; None on 404/failure."""
+    set_code, cn = (set_code or "").strip().lower(), (cn or "").strip()
+    if not set_code or not cn:
+        return None
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{SCRYFALL_API}/cards/{set_code}/{cn}",
+                                    headers=UA, timeout=timeout)
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+    except httpx.HTTPStatusError:
+        raise
+    except (httpx.HTTPError, ValueError, TypeError):
+        return None
+    return None
+
+
 def _normal_image(uris) -> tuple[bool, str | None]:
     """(present, safe_url) for an image_uris value; present is False when there is no usable "normal"."""
     if isinstance(uris, dict) and isinstance(uris.get("normal"), str) and uris["normal"]:

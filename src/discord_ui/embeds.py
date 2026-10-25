@@ -222,6 +222,9 @@ def _want_line(w: CardWant, tz) -> str:
     name = f"**{_md_escape(w.card_name)}**"
     safe = _safe_url(w.scryfall_uri)
     card = f"[{name}]({safe})" if safe else name
+    if w.set_code:
+        cn = _md_escape(w.collector_number) if w.collector_number else ""
+        card += f" — {_md_escape(w.set_code.upper())}{f' #{cn}' if cn else ''}"
     parts = [f"{card} — <@{w.user_id}>"]
     if w.note:
         parts.append(_md_escape(w.note))

@@ -207,7 +207,7 @@ Public: no special permission is needed beyond View Channels and Embed Links (`/
 - Shows a summary of a Moxfield or Archidekt deck, posted publicly. Rate limited per user.
 
 **`/want add <card> [note]`**
-- Adds a card you're looking for to the wants board (max 10 active per user; expires after 30 days).
+- Search for a card (suggestions appear as you type), pick the exact printing (set, number, price, art), and confirm — the want posts with the real card name and chosen printing (max 10 active per user; expires after 30 days).
 
 **`/want browse`**
 - Shows everyone's active wants (ephemeral).

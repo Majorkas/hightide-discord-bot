@@ -25,10 +25,12 @@ from src.discord_ui.role_views import (
 )
 from src.services.deck_service import (
     AmbiguousCardError, build_card_embed, build_deck_embed, fetch_deck, parse_deck_url,
-    scryfall_card,
+    scryfall_autocomplete, scryfall_card, scryfall_printings,
 )
 from src.services.role_service import role_rejection_reason
-from src.services.want_service import add_want, list_wants, remove_want, update_wants_board
+from src.services.want_service import (
+    WantLimitError, add_want_from_printing, list_wants, remove_want, update_wants_board,
+)
 
 log = logging.getLogger("hightide.discord_ui.commands_roles")
 
@@ -50,6 +52,125 @@ _PANEL_FAILED_NOTE = " Discord rejected the panel update — check the role emoj
 
 # Created lazily; tests can monkeypatch or reset to None.
 _session_factory = None
+
+
+def _usd_price(card: dict) -> str | None:
+    prices = card.get("prices")
+    raw = prices.get("usd") if isinstance(prices, dict) else None
+    if isinstance(raw, str) and raw:
+        try:
+            return f"${float(raw):.2f}"
+        except ValueError:
+            return None
+    return None
+
+
+def _printing_image_url(card: dict) -> str | None:
+    uris = card.get("image_uris")
+    if isinstance(uris, dict) and isinstance(uris.get("normal"), str) and uris["normal"]:
+        return uris["normal"]
+    faces = card.get("card_faces")
+    if isinstance(faces, list) and faces and isinstance(faces[0], dict):
+        f = faces[0].get("image_uris")
+        if isinstance(f, dict) and isinstance(f.get("normal"), str):
+            return f["normal"]
+    return None
+
+
+def _printing_option_label(card: dict) -> str:
+    set_code = str(card.get("set", "")).upper() or "?"
+    cn = str(card.get("collector_number", ""))
+    price = _usd_price(card)
+    label = f"{set_code} #{cn}".strip()
+    return f"{label} · {price}" if price else label
+
+
+class _PrintingPickerView(discord.ui.View):
+    """Ephemeral picker: choose the exact printing, then confirm to post the want."""
+
+    def __init__(self, bot, user_id: int, printings: list[dict], note: str | None):
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.user_id = user_id
+        self.note = note
+        # Show up to 25 printings (Discord select cap), preferring the most recent.
+        self._printings = printings[:25]
+        self._by_value: dict[str, dict] = {}
+        options = []
+        for i, card in enumerate(self._printings):
+            value = str(i)
+            self._by_value[value] = card
+            options.append(discord.SelectOption(
+                label=_printing_option_label(card)[:100],
+                description=str(card.get("name", ""))[:100],
+                value=value))
+        select = discord.ui.Select(placeholder="Choose a printing…", options=options)
+        select.callback = self._on_select
+        self.add_item(select)
+        self._selected = self._printings[0] if self._printings else None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This picker isn't yours — run /want add yourself.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        value = interaction.data["values"][0]
+        self._selected = self._by_value.get(value)
+        await interaction.response.edit_message(embed=self.preview_embed(), view=self)
+
+    def preview_embed(self) -> discord.Embed:
+        card = self._selected or {}
+        name = card.get("name", "Unknown")
+        embed = discord.Embed(title=f"Add want: {_md_escape(str(name)[:100])}",
+                              url=card.get("scryfall_uri"), color=0x1F8B4C)
+        embed.description = f"Printing: **{_md_escape(_printing_option_label(card))}**"
+        image = _printing_image_url(card)
+        if image:
+            embed.set_image(url=image)
+        return embed
+
+    @discord.ui.button(label="Add to wants board", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._do_confirm(interaction)
+
+    async def _do_confirm(self, interaction: discord.Interaction) -> None:
+        if self._selected is None:
+            await interaction.response.send_message("Pick a printing first.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        with _session() as session:
+            try:
+                want = add_want_from_printing(session, interaction.guild_id,
+                                              interaction.user.id, self._selected, self.note)
+            except WantLimitError as e:
+                await interaction.followup.send(str(e), ephemeral=True)
+                return
+            except ValueError as e:
+                await interaction.followup.send(str(e), ephemeral=True)
+                return
+            shown = f"**{_md_escape(want.card_name)}**"
+            if want.set_code:
+                shown += f" — {_md_escape(want.set_code.upper())} #{_md_escape(want.collector_number or '')}"
+            cfg = get_or_create_config(session, interaction.guild_id)
+            if not cfg.wants_channel_id:
+                msg = (f"Saved your want {shown}, but no wants channel is set yet — "
+                       "an admin can run /config wants_channel.")
+            else:
+                try:
+                    await update_wants_board(self.bot, session, interaction.guild_id)
+                    msg = f"Added to the wants board: {shown}."
+                except Exception:
+                    log.exception("wants board update failed after add")
+                    session.rollback()
+                    msg = (f"Saved your want {shown}, but I couldn't update the board — "
+                           "check my permissions in the wants channel.")
+        for child in self.children:
+            child.disabled = True
+        await interaction.edit_original_response(embed=self.preview_embed(), view=self)
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 def _session() -> Session:
@@ -459,36 +580,45 @@ class RolesCog(commands.Cog):
     want_group = app_commands.Group(
         name="want", description="Card wants board", guild_only=True)
 
-    @want_group.command(name="add", description="Add a card you're looking for to the wants board")
-    @app_commands.describe(card="Exact card name", note="Optional note, e.g. condition or foil")
+    @want_group.command(name="add",
+                        description="Search for a card and add it to the wants board")
+    @app_commands.describe(card="Card name — pick from the suggestions",
+                           note="Optional note, e.g. condition or foil")
     @app_commands.checks.cooldown(1, _LOOKUP_COOLDOWN_SECONDS, key=lambda i: i.user.id)
     async def want_add(self, interaction: discord.Interaction, card: str,
                        note: str | None = None) -> None:
         await interaction.response.defer(ephemeral=True)
-        with _session() as session:
-            try:
-                want = await add_want(session, interaction.guild_id, interaction.user.id,
-                                      card, note, resolve_timeout=_LOOKUP_TIMEOUT)
-            except ValueError as e:  # validation and per-user cap; messages carry no user text
-                await interaction.followup.send(str(e), ephemeral=True)
-                return
-            shown = f"**{_md_escape(want.card_name)}** (id {want.id})"
-            cfg = get_or_create_config(session, interaction.guild_id)
-            if not cfg.wants_channel_id:
-                msg = (f"Saved your want {shown}, but no wants channel is set yet — "
-                       "an admin can run /config wants_channel.")
-            else:
-                try:
-                    await update_wants_board(self.bot, session, interaction.guild_id)
-                    msg = f"Added to the wants board: {shown}."
-                except Exception:
-                    log.exception("wants board update failed after add")
-                    session.rollback()
-                    msg = (f"Saved your want {shown}, but I couldn't update the board — "
-                           "check my permissions in the wants channel.")
-            if want.scryfall_uri is None:
-                msg += " (no Scryfall match — shown as plain text)"
-        await interaction.followup.send(msg, ephemeral=True)
+        try:
+            printings = await asyncio.wait_for(
+                scryfall_printings(card.strip(), timeout=_LOOKUP_TIMEOUT - 0.1),
+                timeout=_LOOKUP_TIMEOUT)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "Scryfall lookup is taking too long — try again shortly.", ephemeral=True)
+            return
+        except Exception as e:
+            log.warning("Scryfall printings lookup failed for %r: %r", card, e)
+            await interaction.followup.send(
+                "Scryfall is having trouble — try again shortly.", ephemeral=True)
+            return
+        if not printings:
+            await interaction.followup.send(
+                f"I couldn't find a card called **{_md_escape(card)}** on Scryfall. "
+                "Pick a suggestion as you type, or check the spelling.", ephemeral=True)
+            return
+
+        view = _PrintingPickerView(self.bot, interaction.user.id, printings, note)
+        embed = view.preview_embed()
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    @want_add.autocomplete("card")
+    async def want_add_autocomplete(self, interaction: discord.Interaction,
+                                    current: str) -> list[app_commands.Choice[str]]:
+        try:
+            names = await scryfall_autocomplete(current, timeout=2.0)
+        except Exception:
+            return []
+        return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names]
 
     @want_group.command(name="browse", description="See what everyone is looking for")
     async def want_browse(self, interaction: discord.Interaction) -> None:

@@ -177,6 +177,10 @@ class CardWant(Base):
     user_id: Mapped[int] = mapped_column(BigInteger)
     card_name: Mapped[str] = mapped_column(String)
     scryfall_uri: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Chosen printing (exact set/collector) + its card image for the view popover.
+    set_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    collector_number: Mapped[str | None] = mapped_column(String, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String, nullable=True)
     note: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
