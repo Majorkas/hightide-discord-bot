@@ -194,3 +194,64 @@ class ProductAlert(Base):
     guild_id: Mapped[int] = mapped_column(BigInteger)
     external_id: Mapped[str] = mapped_column(String)  # wp:{product_id}
     alerted_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+
+
+# --- decision tracking bot ---
+
+DECISION_STATUSES = ("pending", "confirmed", "rejected")
+
+
+class Decision(Base):
+    __tablename__ = "decisions"
+    # AUTOINCREMENT stops rowid reuse from remapping stale Confirm buttons to new decisions.
+    __table_args__ = {"sqlite_autoincrement": True}
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int] = mapped_column(BigInteger)  # the decider
+    content: Mapped[str] = mapped_column(String)      # raw excerpt (capped at ingest)
+    summary: Mapped[str] = mapped_column(String)      # AI one-liner
+    status: Mapped[str] = mapped_column(String, default="pending")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+    confirmed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
+class TrelloSync(Base):
+    __tablename__ = "trello_sync"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    decision_id: Mapped[int] = mapped_column(Integer, unique=True)
+    trello_card_id: Mapped[str] = mapped_column(String)
+    trello_card_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
+
+
+class DecisionConfig(Base):
+    __tablename__ = "decision_config"
+
+    guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    trello_board_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    trello_list_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class DecisionChannel(Base):
+    __tablename__ = "decision_channels"
+    __table_args__ = (UniqueConstraint("guild_id", "channel_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+
+
+class TrelloMemberMap(Base):
+    __tablename__ = "trello_member_map"
+    __table_args__ = (UniqueConstraint("guild_id", "discord_user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    discord_user_id: Mapped[int] = mapped_column(BigInteger)
+    trello_member_id: Mapped[str] = mapped_column(String)

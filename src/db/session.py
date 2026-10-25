@@ -85,5 +85,20 @@ def ensure_card_wants_printing_columns(engine) -> None:
         log.info("added card_wants.%s column", col_name)
 
 
+def ensure_decision_tables(engine) -> None:
+    """Create the decision-bot tables on pre-existing DBs (fresh DBs get them via create_all)."""
+    from src.db.models import (
+        Decision, DecisionChannel, DecisionConfig, TrelloMemberMap, TrelloSync,
+    )
+    for table in (Decision.__table__, TrelloSync.__table__, DecisionConfig.__table__,
+                  DecisionChannel.__table__, TrelloMemberMap.__table__):
+        try:
+            with engine.begin() as conn:
+                table.create(conn, checkfirst=True)
+        except OperationalError:
+            continue  # already exists
+        log.info("created decision-bot table %s", table.name)
+
+
 def get_session_factory(url: str) -> sessionmaker:
     return sessionmaker(bind=get_engine(url), expire_on_commit=False, future=True)
