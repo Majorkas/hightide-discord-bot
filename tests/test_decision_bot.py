@@ -117,6 +117,35 @@ async def test_recent_context_falls_back_to_current_when_history_fails(db, monke
     assert captured and captured[0][-1].endswith("the thing today for sure")
 
 
+async def test_context_stops_at_last_bot_confirmation_card(db, monkeypatch):
+    """A new topic after a settled decision must not inherit the old thread as context."""
+    _enabled(db)
+    captured = []
+    monkeypatch.setattr(decision_service, "detect_decision",
+                        AsyncMock(side_effect=lambda conv: captured.append(list(conv)) or
+                                    decision_service.DetectionResult(False, "", "")))
+    bot_id = 999
+    # history newest-first: current new topic, then the bot's old confirmation card, then the
+    # OLD settled thread (150/200/175) which must be cut off.
+    bot_card = MagicMock()
+    bot_card.author = MagicMock(bot=True, id=bot_id)  # the bot's own card
+    bot_card.content = ""  # card content lives in the embed
+    old1 = _history_message("I reckon 150", "Jo")
+    old2 = _history_message("ok 175 it is", "Sam")
+
+    m = _message("what do you think of a new event on sundays for commander nights")
+    m.author.bot = False
+    client = MagicMock()
+    client.user = MagicMock(id=bot_id)
+    m.channel.history = lambda **kw: _History([bot_card, old2, old1])  # newest first
+    await _maybe_detect(client, m)
+    assert captured
+    conv = captured[0]
+    # only the new-topic message is in context; the settled 175 thread is cut at the bot card
+    assert len(conv) == 1 and "commander nights" in conv[0]
+    assert not any("175" in line for line in conv)
+
+
 async def test_short_agreement_still_detected(db, monkeypatch):
     """A short agreement ('yes $90 is good') must reach the AI, not be length-filtered."""
     _enabled(db)

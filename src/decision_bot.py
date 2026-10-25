@@ -65,11 +65,12 @@ def create_decision_bot() -> discord.Client:
 CONTEXT_MESSAGES = 10  # how far back to read for back-and-forth context
 
 
-async def _recent_context(message: discord.Message) -> list[str]:
+async def _recent_context(message: discord.Message, bot_user_id: int | None = None) -> list[str]:
     """Recent channel history as 'Name: text' lines, oldest first, ending with this message.
 
-    The current message is always the LAST line (the one being judged). Falls back to
-    just this message when history can't be read. Bot messages are excluded.
+    The current message is always the LAST line (the one being judged). Context stops at the
+    bot's own last confirmation card (a new topic shouldn't inherit a settled decision) and
+    excludes other bot messages. Falls back to just this message when history can't be read.
     """
     def _line(m) -> str:
         name = getattr(m.author, "display_name", None) or "someone"
@@ -80,6 +81,10 @@ async def _recent_context(message: discord.Message) -> list[str]:
         history = []
         async for m in message.channel.history(limit=CONTEXT_MESSAGES - 1,
                                                before=message, oldest_first=False):
+            # The bot's own confirmation card ends the previous decision's thread:
+            # a new topic must not inherit that settled decision as context.
+            if m.author.bot and bot_user_id is not None and m.author.id == bot_user_id:
+                break
             if m.author.bot or not (m.content or "").strip():
                 continue
             history.append(_line(m))
@@ -119,8 +124,10 @@ async def _maybe_detect(client: discord.Client, message: discord.Message) -> Non
             return
 
     # Pull recent history so a back-and-forth agreement ("ok, 175 it is") is judged
-    # with the proposals it resolves, not in isolation.
-    conversation = await _recent_context(message)
+    # with the proposals it resolves, not in isolation. Context stops at the bot's last
+    # confirmation card so a new topic starts fresh.
+    bot_user_id = client.user.id if getattr(client, "user", None) else None
+    conversation = await _recent_context(message, bot_user_id)
     result = await decision_service.detect_decision(conversation)
     if result is None or not result.is_decision:
         return
