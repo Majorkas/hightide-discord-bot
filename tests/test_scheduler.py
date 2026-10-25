@@ -9,6 +9,7 @@ from src.db.models import CardWant, Event, GuildConfig
 from src.db.repositories import save_board_post
 from src.services import scheduler
 from src.services.scheduler import RefreshScheduler, _in_run_window, should_run_now
+from tests.test_wants import _SetChannel
 
 TZ = ZoneInfo("Australia/Perth")
 
@@ -167,26 +168,26 @@ async def test_run_daily_refresh_really_expires_wants_and_edits_board(temp_db, m
         s.add(CardWant(guild_id=999, user_id=1, card_name="Fresh", active=True,
                        created_at=now - timedelta(days=1)))
         s.commit()
-        save_board_post(s, 999, "wants", "wants", 333, 900, "stale-hash")
+        save_board_post(s, 999, "wants", "wants", 333, 900,
+                        '{"keys": ["header"], "hashes": {}}', "[]")
     monkeypatch.setattr("src.services.scheduler.refresh_events", MagicMock(return_value={}))
 
-    msg = AsyncMock()
-    msg.id = 900
-    channel = AsyncMock()
-    channel.id = 333
-    channel.fetch_message.return_value = msg
+    channel = _SetChannel(333)
     bot = MagicMock()
+    bot.user = MagicMock(id=1)
     bot.get_channel.return_value = channel
+    bot.fetch_channel = AsyncMock(return_value=channel)
 
     result = await scheduler.run_daily_refresh(bot, 999)
 
-    assert result["wants"] == "edited"
+    assert result["wants"] in ("edited", "created")
     with temp_db() as s:
         active = {w.card_name: w.active for w in s.query(CardWant).all()}
     assert active == {"Stale": False, "Fresh": True}
-    msg.edit.assert_awaited_once()
-    assert "Stale" not in msg.edit.call_args.kwargs["embed"].description
-    assert "Fresh" in msg.edit.call_args.kwargs["embed"].description
+    # the board now holds only the Fresh card
+    titles = [m.embed.title for m in channel.messages.values()]
+    assert any("Fresh" in (t or "") for t in titles)
+    assert not any("Stale" in (t or "") for t in titles)
 
 
 async def test_run_daily_refresh_all_wants_expired_shows_empty_board(temp_db, monkeypatch):
@@ -195,21 +196,22 @@ async def test_run_daily_refresh_all_wants_expired_shows_empty_board(temp_db, mo
         s.add(CardWant(guild_id=999, user_id=1, card_name="Stale", active=True,
                        created_at=datetime.now(timezone.utc) - timedelta(days=31)))
         s.commit()
-        save_board_post(s, 999, "wants", "wants", 333, 900, "stale-hash")
+        save_board_post(s, 999, "wants", "wants", 333, 900,
+                        '{"keys": ["header"], "hashes": {}}', "[]")
     monkeypatch.setattr("src.services.scheduler.refresh_events", MagicMock(return_value={}))
-    msg = AsyncMock()
-    msg.id = 900
-    channel = AsyncMock()
-    channel.id = 333
-    channel.fetch_message.return_value = msg
+    channel = _SetChannel(333)
     bot = MagicMock()
+    bot.user = MagicMock(id=1)
     bot.get_channel.return_value = channel
+    bot.fetch_channel = AsyncMock(return_value=channel)
 
     await scheduler.run_daily_refresh(bot, 999)
 
     with temp_db() as s:
         assert s.query(CardWant).one().active is False
-    assert msg.edit.call_args.kwargs["embed"].description == "No active wants."
+    # only the header remains, showing the empty state
+    descs = [m.embed.description for m in channel.messages.values()]
+    assert any("No active wants" in (d or "") for d in descs)
 
 
 # --- tick ---

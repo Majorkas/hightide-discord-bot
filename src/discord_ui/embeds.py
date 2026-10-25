@@ -264,6 +264,25 @@ def build_wants_embed(wants: list[CardWant], tz) -> discord.Embed:
     return discord.Embed(title="Card Wants", description=text, color=_COLOR)
 
 
+def build_want_card(w: CardWant, tz) -> discord.Embed:
+    """One message-card per want: name (linked to the printing), printing, who, note, date,
+    with the card art as a small right-side thumbnail."""
+    desc = f"<@{w.user_id}>"
+    if w.note:
+        desc += f" · {_md_escape(w.note)}"
+    desc += f" · {w.created_at.astimezone(tz).strftime('%b %d')}"
+    title = _md_escape(w.card_name[:MAX_TITLE_CHARS])
+    if w.set_code:
+        cn = _md_escape(w.collector_number) if w.collector_number else ""
+        title += f" — {_md_escape(w.set_code.upper())}{f' #{cn}' if cn else ''}"
+    card = discord.Embed(title=title, url=_safe_url(w.scryfall_uri),
+                         description=desc, color=_COLOR)
+    image = _safe_url(w.image_url)
+    if image:
+        card.set_thumbnail(url=image)
+    return card
+
+
 def _parse_iso_date(value: str | None) -> date | None:
     try:
         return date.fromisoformat(value) if value else None

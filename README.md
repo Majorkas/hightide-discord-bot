@@ -16,7 +16,7 @@ A Discord bot that pulls upcoming tabletop gaming events from Hightide Tabletop'
 - **Tonight post**: At the daily refresh, "Today at Hightide" is posted to the announce channel when events exist today (once per day)
 - **Sign-ups**: Every week-board event card has a Going button with a live count; admins list names with `/board signups`
 - **Card and deck lookup**: `/card` shows a Scryfall card; `/deck` shows a Moxfield or Archidekt deck summary
-- **Wants board**: Members track cards they're looking for with `/want`; a persistent board in the wants channel, entries expire after 30 days
+- **Wants board**: Members track cards they're looking for with `/want`; a persistent channel shows each want as its own card with a thumbnail, entries expire after 30 days
 - **Product alerts**: Products newly added to the shop (its New In page) post once each to the new-stock channel; event tickets and consumables (snacks, soft drinks) are excluded. The watch seeds silently the first time it runs
 - **Preorders board**: A persistent channel shows every current preorder as a full image card, updating automatically as preorders are added or removed
 

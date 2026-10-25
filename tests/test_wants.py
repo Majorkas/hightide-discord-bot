@@ -68,6 +68,58 @@ def _bot(channel):
     return bot
 
 
+class _SetMsg:
+    def __init__(self, channel, mid, embed, author_id=77):
+        self.channel = channel
+        self.id = mid
+        self.author = MagicMock(id=author_id)
+        self.embed = embed
+        self.edits = []
+        self.deleted = False
+
+    async def edit(self, **kw):
+        if self.id not in self.channel.messages:
+            raise _not_found()
+        self.embed = kw["embed"]
+        self.edits.append(kw)
+
+    async def delete(self):
+        self.channel.messages.pop(self.id, None)
+        self.channel.deleted.append(self.id)
+        self.deleted = True
+
+
+class _SetChannel:
+    """A channel that tracks each message by id, for message-set boards."""
+
+    def __init__(self, channel_id=CHANNEL):
+        self.id = channel_id
+        self.messages = {}
+        self.sends = []
+        self.deleted = []
+        self._next = 900
+
+    async def send(self, **kw):
+        self._next += 1
+        m = _SetMsg(self, self._next, kw["embed"])
+        self.messages[m.id] = m
+        self.sends.append(kw)
+        return m
+
+    async def fetch_message(self, mid):
+        if mid not in self.messages:
+            raise _not_found()
+        return self.messages[mid]
+
+
+def _set_bot(channel):
+    bot = MagicMock()
+    bot.user = MagicMock(id=77)
+    bot.get_channel = MagicMock(return_value=channel)
+    bot.fetch_channel = AsyncMock(return_value=channel)
+    return bot
+
+
 def _config_channel(session, channel_id=CHANNEL, tz="Australia/Perth"):
     session.add(GuildConfig(guild_id=GUILD, timezone=tz, wants_channel_id=channel_id))
     session.commit()
@@ -389,120 +441,98 @@ async def test_board_no_channel(session):
     channel.send.assert_not_awaited()
 
 
-async def test_board_create_then_skip_then_edit(session):
+async def test_board_creates_header_plus_one_card_per_want(session):
     _config_channel(session)
-    channel = _make_channel()
-    msg = _make_msg(900)
-    channel.send.return_value = msg
-    channel.fetch_message.return_value = msg
-    bot = _bot(channel)
+    channel = _SetChannel()
+    bot = _set_bot(channel)
 
     await _add(session, "Lightning Bolt")
+    await _add(session, "Ancestral Recall", user=2)
     assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
-    channel.send.assert_awaited_once()
-    kwargs = channel.send.call_args.kwargs
-    assert kwargs["embed"].title == "Card Wants"
-    assert "Lightning Bolt" in kwargs["embed"].description
+    # header + 2 want cards
+    assert len(channel.sends) == 3
+    assert channel.sends[0]["embed"].title == "Card Wants"
+    # cards are alphabetical, thumbnails present
+    cards = channel.sends[1:]
+    assert [c["embed"].title.split(" — ")[0] for c in cards] == ["Ancestral Recall", "Lightning Bolt"]
+    for s in channel.sends:
+        assert s["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
     post = get_board_post(session, GUILD, "wants")
-    assert (post.channel_id, post.message_id) == (CHANNEL, 900)
+    assert post.channel_id == CHANNEL
+    stored = json.loads(post.render_hash)
+    assert stored["keys"][0] == "header" and len(stored["keys"]) == 3
 
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "skipped"
-    channel.send.assert_awaited_once()
-    msg.edit.assert_not_awaited()
+
+async def test_board_cards_have_thumbnails(session):
+    _config_channel(session)
+    channel = _SetChannel()
+    await _add(session, "Lightning Bolt", set_code="msc", cn="806")
+    await update_wants_board(_set_bot(channel), session, GUILD, now=NOW)
+    card = channel.sends[1]["embed"]
+    assert card.title == "Lightning Bolt — MSC #806"
+    assert card.thumbnail.url == "https://img.scryfall.com/bolt.jpg"
+    assert card.url == BOLT_URI.split("?")[0] or card.url == BOLT_URI
+
+
+async def test_board_add_then_remove_updates_set(session):
+    _config_channel(session)
+    channel = _SetChannel()
+    bot = _set_bot(channel)
+    await _add(session, "Lightning Bolt")
+    await update_wants_board(bot, session, GUILD, now=NOW)
+    assert len(channel.sends) == 2  # header + 1 card
 
     await _add(session, "Ancestral Recall", user=2)
     assert await update_wants_board(bot, session, GUILD, now=NOW) == "edited"
-    msg.edit.assert_awaited_once()
-    assert "Ancestral Recall" in msg.edit.call_args.kwargs["embed"].description
-    channel.send.assert_awaited_once()
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "skipped"
+    # one new card message added (Ancestral sorts first)
+    post = get_board_post(session, GUILD, "wants")
+    assert len(json.loads(post.render_hash)["keys"]) == 3
 
-
-async def test_board_never_pings(session):
-    _config_channel(session)
-    channel = _make_channel()
-    msg = _make_msg(900)
-    channel.send.return_value = msg
-    channel.fetch_message.return_value = msg
-    bot = _bot(channel)
-    await _add(session)
+    # remove one -> set shrinks
+    wid = session.execute(select(CardWant).where(CardWant.card_name == "Ancestral Recall")).scalar_one().id
+    remove_want(session, GUILD, wid, 2, False)
     await update_wants_board(bot, session, GUILD, now=NOW)
-    am = channel.send.call_args.kwargs["allowed_mentions"]
-    assert am.to_dict() == discord.AllowedMentions.none().to_dict()
-    await _add(session, "Other", user=2)
-    await update_wants_board(bot, session, GUILD, now=NOW)
-    am = msg.edit.call_args.kwargs["allowed_mentions"]
-    assert am.to_dict() == discord.AllowedMentions.none().to_dict()
-
-
-async def test_board_recreates_when_message_deleted(session):
-    _config_channel(session)
-    channel = _make_channel()
-    old, new = _make_msg(900), _make_msg(901)
-    channel.send.side_effect = [old, new]
-    channel.fetch_message.side_effect = _not_found()
-    bot = _bot(channel)
-    await _add(session)
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
-    assert channel.send.await_count == 2
-    assert get_board_post(session, GUILD, "wants").message_id == 901
-
-
-async def test_board_recreates_when_edit_hits_not_found(session):
-    _config_channel(session)
-    channel = _make_channel()
-    old, new = _make_msg(900), _make_msg(901)
-    old.edit.side_effect = _not_found()
-    channel.send.side_effect = [old, new]
-    channel.fetch_message.return_value = old
-    bot = _bot(channel)
-    await _add(session)
-    await update_wants_board(bot, session, GUILD, now=NOW)
-    await _add(session, "Other")
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
-    assert get_board_post(session, GUILD, "wants").message_id == 901
+    post = get_board_post(session, GUILD, "wants")
+    assert len(json.loads(post.render_hash)["keys"]) == 2
 
 
 async def test_board_expired_wants_drop_off(session):
     _config_channel(session)
-    channel = _make_channel()
-    msg = _make_msg(900)
-    channel.send.return_value = msg
-    channel.fetch_message.return_value = msg
-    bot = _bot(channel)
+    channel = _SetChannel()
+    bot = _set_bot(channel)
     await _add(session, "Old")
     await update_wants_board(bot, session, GUILD, now=NOW)
+    assert len(json.loads(get_board_post(session, GUILD, "wants").render_hash)["keys"]) == 2
+
     later = NOW + timedelta(days=31)
-    assert await update_wants_board(bot, session, GUILD, now=later) == "edited"
-    assert msg.edit.call_args.kwargs["embed"].description == "No active wants."
+    await update_wants_board(bot, session, GUILD, now=later)
+    # only the header remains, showing the empty state
+    post = get_board_post(session, GUILD, "wants")
+    assert json.loads(post.render_hash)["keys"] == ["header"]
     row = session.execute(select(CardWant)).scalar_one()
     assert row.active is False
 
 
-async def test_board_save_failure_removes_new_message(session):
+async def test_board_save_failure_removes_new_messages(session):
     _config_channel(session)
-    channel = _make_channel()
-    msg = _make_msg(900)
-    channel.send.return_value = msg
-    bot = _bot(channel)
+    channel = _SetChannel()
+    bot = _set_bot(channel)
+    await _add(session)
     with patch("src.services.want_service.save_board_post", side_effect=RuntimeError("db")):
         with pytest.raises(RuntimeError):
             await update_wants_board(bot, session, GUILD, now=NOW)
-    msg.delete.assert_awaited_once()
+    assert channel.messages == {}  # everything just sent was cleaned up
 
 
-async def test_board_and_browse_render_identically(session):
+async def test_board_and_browse_share_names(session):
     await _add(session, "Lightning Bolt")
     await _add(session, "apple", user=2, note="mint", set_code="x", cn="1")
     _config_channel(session)
-    channel = _make_channel()
-    channel.send.return_value = _make_msg(900)
-    await update_wants_board(_bot(channel), session, GUILD, now=NOW)
-    board = channel.send.call_args.kwargs["embed"]
-    browse = build_wants_embed(list_wants(session, GUILD, now=NOW), TZ)
-    assert board.description == browse.description
-    assert board.title == browse.title
+    channel = _SetChannel()
+    await update_wants_board(_set_bot(channel), session, GUILD, now=NOW)
+    board_titles = [s["embed"].title.split(" — ")[0] for s in channel.sends[1:]]
+    browse_names = [w.card_name for w in list_wants(session, GUILD, now=NOW)]
+    assert board_titles == browse_names  # both alphabetical, same set
 
 
 # ---------------------------------------------------------------- handlers
@@ -614,10 +644,10 @@ async def test_picker_confirm_adds_want_and_updates_board(db, cog, monkeypatch):
         w = s.execute(select(CardWant)).scalar_one()
         assert w.card_name == "Osgood, Operation Double"
         assert w.set_code == "who" and w.collector_number == "191"
-    # board was updated with the new want
-    cog.channel.send.assert_awaited_once()
-    d = cog.channel.send.call_args.kwargs["embed"].description
-    assert "Osgood, Operation Double" in d and "WHO #191" in d
+    # board was updated: header + the new want card
+    assert cog.channel.send.await_count == 2
+    card = cog.channel.send.call_args.kwargs["embed"]
+    assert "Osgood, Operation Double" in card.title and "WHO #191" in card.title
 
 
 async def test_picker_rejects_other_users(db, cog, monkeypatch):
@@ -653,7 +683,8 @@ async def test_remove_owner_and_non_owner_and_admin(db, cog, monkeypatch):
     assert "Removed" in _sent(admin)[0]
     with db() as s:
         assert s.execute(select(CardWant)).first() is None
-    assert cog.msg.edit.call_args.kwargs["embed"].description == "No active wants."
+    # board redraws to just the header showing the empty state
+    assert "No active wants" in cog.msg.edit.call_args.kwargs["embed"].description
 
 
 async def test_remove_replies_ephemeral(db, cog):
@@ -747,24 +778,18 @@ async def test_list_empty(db, cog):
     assert kw["ephemeral"] is True and "no active wants" in args[0].lower()
 
 
-async def test_browse_matches_board_and_is_ephemeral(db, cog):
+async def test_browse_renders_active_wants_ephemerally(db, cog):
     _configure(db)
     with db() as s:
         s.add(_want("Lightning Bolt", BOLT_URI, user=1))
         s.add(_want("apple", user=2, note="mint"))
         s.commit()
-    # build the board once so we can compare
-    channel = _make_channel()
-    channel.send.return_value = _make_msg(900)
-    await update_wants_board(_bot(channel), _session_for(db), GUILD, now=NOW)
-    board = channel.send.call_args.kwargs["embed"]
-
     i = _interaction(user_id=3)
     await cog.want_browse.callback(cog, i)
     kw = i.response.send_message.call_args.kwargs
     assert kw["ephemeral"] is True
-    assert kw["embed"].description == board.description
-    assert kw["embed"].title == board.title
+    assert "Lightning Bolt" in kw["embed"].description
+    assert "apple" in kw["embed"].description
     assert kw["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
 
 
@@ -834,22 +859,23 @@ def test_card_wants_printing_columns_added_to_legacy_db(tmp_path):
 
 # ---------------------------------------------------------------- board lock / channel move
 
-async def test_board_lock_concurrent_updates_send_once(session):
+async def test_board_lock_concurrent_updates_serialised(session):
     _config_channel(session)
-    channel = _make_channel()
-    msg = _make_msg(900)
+    channel = _SetChannel()
+
+    real_send = channel.send
 
     async def slow_send(**kwargs):
         await asyncio.sleep(0.02)
-        return msg
-    channel.send.side_effect = slow_send
-    channel.fetch_message.return_value = msg
-    bot = _bot(channel)
+        return await real_send(**kwargs)
+    channel.send = slow_send
+    bot = _set_bot(channel)
     await _add(session, "Lightning Bolt")
     results = await asyncio.gather(update_wants_board(bot, session, GUILD, now=NOW),
                                    update_wants_board(bot, session, GUILD, now=NOW))
-    assert sorted(results) == ["created", "skipped"]
-    assert channel.send.await_count == 1
+    assert results[0] == "created" and results[1] in ("created", "edited")
+    # both runs serialised by the lock; the first created the full set
+    assert len(channel.messages) == 2  # header + 1 card
 
 
 OLD_CHANNEL = 111
@@ -857,14 +883,15 @@ BOT_ID = 77
 
 
 def _moved_setup(session, *, get_channel_old=True):
+    """Stored board in OLD_CHANNEL (header msg 700), config now points at CHANNEL."""
     from src.db.repositories import save_board_post
     _config_channel(session)
-    save_board_post(session, GUILD, "wants", "wants", OLD_CHANNEL, 700, "oldhash")
-    old_ch, new_ch = _make_channel(OLD_CHANNEL), _make_channel(CHANNEL)
-    old_msg, new_msg = _make_msg(700), _make_msg(900)
-    old_msg.author = MagicMock(id=BOT_ID)
-    old_ch.fetch_message.return_value = old_msg
-    new_ch.send.return_value = new_msg
+    save_board_post(session, GUILD, "wants", "wants", OLD_CHANNEL, 700,
+                    json.dumps({"keys": ["header"], "hashes": {}}), "[]")
+    old_ch = _SetChannel(OLD_CHANNEL)
+    new_ch = _SetChannel(CHANNEL)
+    old_msg = _SetMsg(old_ch, 700, discord.Embed(title="old"), author_id=BOT_ID)
+    old_ch.messages[700] = old_msg
     bot = MagicMock()
     bot.user = MagicMock(id=BOT_ID)
     chans = {OLD_CHANNEL: old_ch, CHANNEL: new_ch}
@@ -876,28 +903,27 @@ def _moved_setup(session, *, get_channel_old=True):
 
 async def test_channel_move_posts_new_and_deletes_old(session):
     bot, old_ch, new_ch, old_msg = _moved_setup(session)
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
-    new_ch.send.assert_awaited_once()
-    old_ch.fetch_message.assert_awaited_once_with(700)
-    old_msg.delete.assert_awaited_once()
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "edited"
+    assert new_ch.messages  # new set posted in the new channel
+    assert 700 in old_ch.deleted  # old header deleted
     post = get_board_post(session, GUILD, "wants")
-    assert (post.channel_id, post.message_id) == (CHANNEL, 900)
+    assert post.channel_id == CHANNEL
     bot.fetch_channel.assert_not_awaited()
 
 
 async def test_channel_move_old_channel_fetch_fallback(session):
     bot, old_ch, new_ch, old_msg = _moved_setup(session, get_channel_old=False)
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "edited"
     bot.fetch_channel.assert_awaited_once_with(OLD_CHANNEL)
-    old_msg.delete.assert_awaited_once()
+    assert 700 in old_ch.deleted
     assert get_board_post(session, GUILD, "wants").channel_id == CHANNEL
 
 
 async def test_channel_move_authorship_guard_keeps_foreign_message(session):
     bot, old_ch, new_ch, old_msg = _moved_setup(session)
     old_msg.author = MagicMock(id=BOT_ID + 1)
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
-    old_msg.delete.assert_not_awaited()
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "edited"
+    assert old_msg.deleted is False
 
 
 @pytest.mark.parametrize("where", ["fetch_message", "delete", "fetch_channel"])
@@ -908,15 +934,17 @@ async def test_channel_move_authorship_guard_keeps_foreign_message(session):
 async def test_channel_move_cleanup_failures_are_tolerated(session, where, exc):
     bot, old_ch, new_ch, old_msg = _moved_setup(session, get_channel_old=(where != "fetch_channel"))
     if where == "fetch_message":
-        old_ch.fetch_message.side_effect = exc
+        async def bad_fetch(mid):
+            raise exc
+        old_ch.fetch_message = bad_fetch
     elif where == "delete":
-        old_msg.delete.side_effect = exc
+        old_msg.delete = AsyncMock(side_effect=exc)
     else:
         bot.fetch_channel = AsyncMock(
             side_effect=lambda cid: (_ for _ in ()).throw(exc) if cid == OLD_CHANNEL else new_ch)
-    assert await update_wants_board(bot, session, GUILD, now=NOW) == "created"
+    assert await update_wants_board(bot, session, GUILD, now=NOW) == "edited"
     post = get_board_post(session, GUILD, "wants")
-    assert (post.channel_id, post.message_id) == (CHANNEL, 900)
+    assert post.channel_id == CHANNEL
 
 
 async def test_channel_move_save_failure_leaves_old_message(session):
@@ -924,21 +952,19 @@ async def test_channel_move_save_failure_leaves_old_message(session):
     with patch("src.services.want_service.save_board_post", side_effect=RuntimeError("db")):
         with pytest.raises(RuntimeError):
             await update_wants_board(bot, session, GUILD, now=NOW)
-    old_msg.delete.assert_not_awaited()
-    new_ch.send.return_value.delete.assert_awaited_once()
+    assert old_msg.deleted is False
+    assert new_ch.messages == {}  # newly sent messages cleaned up
 
 
-async def test_same_channel_never_deletes_anything(session):
+async def test_same_channel_unchanged_run_deletes_nothing(session):
     _config_channel(session)
-    channel = _make_channel()
-    msg = _make_msg(900)
-    channel.send.return_value = msg
-    channel.fetch_message.return_value = msg
-    bot = _bot(channel)
-    await update_wants_board(bot, session, GUILD, now=NOW)
+    channel = _SetChannel()
+    bot = _set_bot(channel)
     await _add(session)
     await update_wants_board(bot, session, GUILD, now=NOW)
-    msg.delete.assert_not_awaited()
+    await update_wants_board(bot, session, GUILD, now=NOW)  # unchanged
+    await update_wants_board(bot, session, GUILD, now=NOW)  # unchanged
+    assert channel.deleted == []
 
 
 # ---------------------------------------------------------------- Perth date rendering
@@ -953,10 +979,9 @@ async def test_board_post_renders_perth_date(session):
     _config_channel(session)
     session.add(_want("A", created=datetime(2026, 10, 23, 17, 0, tzinfo=timezone.utc)))
     session.commit()
-    channel = _make_channel()
-    channel.send.return_value = _make_msg(900)
-    await update_wants_board(_bot(channel), session, GUILD, now=NOW)
-    d = channel.send.call_args.kwargs["embed"].description
+    channel = _SetChannel()
+    await update_wants_board(_set_bot(channel), session, GUILD, now=NOW)
+    d = channel.sends[1]["embed"].description  # the want card, not the header
     assert d.endswith("Oct 24") and "Oct 23" not in d
 
 

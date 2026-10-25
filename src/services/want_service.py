@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -10,8 +11,10 @@ from sqlalchemy.orm import Session
 
 from src.db.models import CardWant
 from src.db.repositories import get_board_post, get_or_create_config, save_board_post
-from src.discord_ui.embeds import _safe_url, build_wants_embed, want_sort_key
-from src.services.board_service import _get_board_lock
+from src.discord_ui.embeds import _safe_url, build_want_card, build_wants_embed, want_sort_key
+from src.services.board_service import (
+    _delete_stored_messages, _get_board_lock, _loads_ids,
+)
 
 log = logging.getLogger("hightide.wants")
 
@@ -136,50 +139,116 @@ async def update_wants_board(bot, session: Session, guild_id: int, *,
         return await _update_wants_board_locked(bot, session, guild_id, now)
 
 
+def _want_item_hash(w: CardWant, tz) -> str:
+    parts = [w.card_name, str(w.set_code), str(w.collector_number), str(w.scryfall_uri),
+             str(w.image_url), str(w.note), str(w.user_id),
+             w.created_at.astimezone(tz).strftime("%b %d")]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _wants_header(count: int) -> discord.Embed:
+    desc = (f"{count} card{'s' if count != 1 else ''} wanted."
+            if count else "No active wants. Add one with /want add.")
+    return discord.Embed(title="Card Wants", description=desc, color=0x1F8B4C)
+
+
 async def _update_wants_board_locked(bot, session: Session, guild_id: int,
                                      now: datetime | None) -> str:
     cfg = get_or_create_config(session, guild_id)
     if not cfg.wants_channel_id:
         return "no_channel"
     tz = ZoneInfo(cfg.timezone)
-    embed = build_wants_embed(list_wants(session, guild_id, now=now), tz)
-    new_hash = hashlib.sha1((embed.description or "").encode("utf-8")).hexdigest()
+    wants = list_wants(session, guild_id, now=now)  # already alphabetically sorted
     no_mentions = discord.AllowedMentions.none()
+
+    keys = [str(w.id) for w in wants]
+    hashes = {"header": hashlib.sha1(f"wants:{len(wants)}".encode()).hexdigest()}
+    hashes.update({k: _want_item_hash(w, tz) for k, w in zip(keys, wants)})
 
     channel = bot.get_channel(cfg.wants_channel_id) or await bot.fetch_channel(cfg.wants_channel_id)
     post = get_board_post(session, guild_id, BOARD_TYPE)
-    moved_from = (post.channel_id, post.message_id) if post and post.channel_id != channel.id else None
-    msg = None
+    moved_from = None
+    stored: dict[str, tuple[int, str | None]] = {}
+    extras: list[int] = []
     if post and post.channel_id == channel.id:
+        ids = [post.message_id, *_loads_ids(post.message_ids)]
         try:
-            msg = await channel.fetch_message(post.message_id)
-        except discord.NotFound:
-            log.info("wants board message missing, recreating")
+            data = json.loads(post.render_hash)
+            skeys, shashes = data["keys"], data["hashes"]
+            if isinstance(skeys, list) and isinstance(shashes, dict) and len(skeys) == len(ids):
+                stored = {k: (mid, shashes.get(k)) for k, mid in zip(skeys, ids)}
+        except (ValueError, TypeError, KeyError):
+            extras = ids[1:]
+    elif post:
+        moved_from = (post.channel_id, post.message_id)
 
-    if msg is not None:
-        if post.render_hash == new_hash:
-            return "skipped"
+    # Edit the header in place when present; recreate on a key-set change.
+    header_msg = None
+    if "header" in stored:
         try:
-            await msg.edit(embed=embed, allowed_mentions=no_mentions)
+            header_msg = await channel.fetch_message(stored["header"][0])
+            if stored["header"][1] != hashes["header"]:
+                await header_msg.edit(embed=_wants_header(len(wants)), allowed_mentions=no_mentions)
         except discord.NotFound:
-            log.info("wants board message missing, recreating")
-        else:
-            save_board_post(session, guild_id, BOARD_TYPE, BOARD_TYPE, channel.id, msg.id, new_hash)
-            return "edited"
+            header_msg = None
 
-    new_msg = await channel.send(embed=embed, allowed_mentions=no_mentions)
+    if header_msg is not None and stored:
+        stored_cards = [k for k in stored if k != "header"]
+        if sorted(stored_cards) != sorted(keys):
+            await _delete_stored_messages(
+                bot, channel, [mid for k, (mid, _) in stored.items()] + extras)
+            stored, extras, header_msg = {}, [], None
+
+    if header_msg is None and stored:
+        await _delete_stored_messages(
+            bot, channel, [mid for k, (mid, _) in stored.items() if k != "header"] + extras)
+        stored, extras = {}, []
+
+    sent: list = []
+    new_ids: dict[str, int] = {}
     try:
-        save_board_post(session, guild_id, BOARD_TYPE, BOARD_TYPE, channel.id, new_msg.id, new_hash)
+        if header_msg is None:
+            header_msg = await channel.send(embed=_wants_header(len(wants)),
+                                            allowed_mentions=no_mentions)
+            sent.append(header_msg)
+        new_ids["header"] = header_msg.id
+
+        for key, w in zip(keys, wants):
+            embed = build_want_card(w, tz)
+            old = stored.get(key)
+            if old is not None and old[1] == hashes[key]:
+                new_ids[key] = old[0]
+                continue
+            if old is not None:
+                try:
+                    card_msg = await channel.fetch_message(old[0])
+                    await card_msg.edit(embed=embed, allowed_mentions=no_mentions)
+                    new_ids[key] = old[0]
+                    continue
+                except discord.NotFound:
+                    pass
+            msg = await channel.send(embed=embed, allowed_mentions=no_mentions)
+            sent.append(msg)
+            new_ids[key] = msg.id
+
+        stale = [mid for k, (mid, _) in stored.items() if k not in new_ids] + extras
+        save_board_post(session, guild_id, BOARD_TYPE, BOARD_TYPE, channel.id,
+                        new_ids["header"],
+                        json.dumps({"keys": ["header", *keys], "hashes": hashes}),
+                        json.dumps([new_ids[k] for k in keys]))
     except Exception:
-        log.exception("saving wants board post failed; removing new message")
-        try:
-            await new_msg.delete()
-        except Exception:
-            log.exception("cleanup of unsaved wants board message failed")
+        log.exception("wants board update failed; removing %d newly sent message(s)", len(sent))
+        for msg in sent:
+            try:
+                await msg.delete()
+            except Exception:
+                log.exception("cleanup of unsaved wants message failed")
         raise
+
+    await _delete_stored_messages(bot, channel, stale)
     if moved_from is not None:
         await _delete_old_board_message(bot, *moved_from)
-    return "created"
+    return "created" if not post else "edited"
 
 
 async def _delete_old_board_message(bot, channel_id: int, message_id: int) -> None:
