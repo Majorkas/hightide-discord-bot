@@ -111,6 +111,28 @@ def test_record_trello_sync_idempotent(session):
     assert len(rows) == 1
 
 
+def test_get_trello_sync_queries_by_decision_id_not_pk(session):
+    # Sync only the SECOND decision; its sync-row PK (1) collides with the first
+    # decision's id. get_trello_sync(d1.id) must NOT return d2's row.
+    d1 = _add(session, summary="first")
+    d2 = _add(session, summary="second")
+    set_decision_status(session, GUILD, d2.id, "confirmed", confirmed_by=1)
+    record_trello_sync(session, d2.id, "cardX", None)
+    assert get_trello_sync(session, d1.id) is None
+    assert get_trello_sync(session, d2.id).trello_card_id == "cardX"
+
+
+def test_set_status_only_transitions_pending(session):
+    d = _add(session)
+    set_decision_status(session, GUILD, d.id, "confirmed", confirmed_by=1)
+    # already confirmed: a second confirm is a no-op (returns None)
+    assert set_decision_status(session, GUILD, d.id, "confirmed", confirmed_by=2) is None
+    # dismiss after confirm: also a no-op, status and attribution preserved
+    assert set_decision_status(session, GUILD, d.id, "rejected") is None
+    got = get_decision(session, GUILD, d.id)
+    assert got.status == "confirmed" and got.confirmed_by == 1
+
+
 def test_pending_decisions_are_not_unsynced(session):
     _add(session)
     assert get_confirmed_unsynced_decisions(session, GUILD) == []

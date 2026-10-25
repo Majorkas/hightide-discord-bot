@@ -143,3 +143,36 @@ async def test_dismiss_unknown_replies_gone(db):
     i = _interaction()
     await handle_decision_action(i, "dismiss", 9999)
     assert "no longer pending" in i.followup.send.call_args.args[0]
+
+
+# --- authorization + idempotency (council findings) ---
+
+async def test_non_staff_cannot_confirm_or_dismiss(db, monkeypatch):
+    did = _db_with_pending(db)
+    sync = AsyncMock()
+    monkeypatch.setattr(decision_service, "sync_decision_to_trello", sync)
+    for action in ("confirm", "dismiss"):
+        i = _interaction()
+        i.user.guild_permissions = discord.Permissions()  # no manage_guild: not staff
+        await handle_decision_action(i, action, did)
+        assert "staff" in i.response.send_message.call_args.args[0].lower()
+        i.response.defer.assert_not_awaited()  # rejected before any work
+    with db() as s:
+        d = s.execute(__import__("sqlalchemy").select(Decision)).scalar_one()
+        assert d.status == "pending"  # unchanged
+    sync.assert_not_awaited()
+
+
+async def test_dismiss_after_confirm_is_rejected_as_resolved(db, monkeypatch):
+    did = _db_with_pending(db)
+    monkeypatch.setattr(decision_service, "sync_decision_to_trello",
+                        AsyncMock(return_value=True))
+    i = _interaction()
+    await handle_decision_action(i, "confirm", did)
+    # now try to dismiss the confirmed decision
+    i2 = _interaction()
+    await handle_decision_action(i2, "dismiss", did)
+    assert "no longer pending" in i2.followup.send.call_args.args[0]
+    with db() as s:
+        d = s.execute(__import__("sqlalchemy").select(Decision)).scalar_one()
+        assert d.status == "confirmed"  # not flipped to rejected

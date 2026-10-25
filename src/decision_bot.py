@@ -12,23 +12,52 @@ from src import config
 log = logging.getLogger("hightide.decision_bot")
 
 MIN_MESSAGE_CHARS = 25  # ignore very short messages ("ok", "lol") — no decision there
+# Per-channel detection throttle: a spammer can't drive unbounded OpenAI spend.
+_MAX_DETECTIONS_PER_MINUTE = 6
+_channel_windows: dict[int, list[float]] = {}
+
+
+def _throttled(channel_id: int) -> bool:
+    """True when the channel has hit the per-minute detection cap."""
+    import time
+    now = time.monotonic()
+    window = [t for t in _channel_windows.get(channel_id, []) if now - t < 60]
+    if len(window) >= _MAX_DETECTIONS_PER_MINUTE:
+        _channel_windows[channel_id] = window
+        return True
+    window.append(now)
+    _channel_windows[channel_id] = window
+    return False
+
+
+class DecisionBot(discord.Client):
+    """The decision bot client; registers its own dynamic items + tables in setup_hook."""
+
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(intents=intents)
+
+    async def setup_hook(self) -> None:
+        # This client authors the Confirm/Dismiss cards, so it must register the
+        # DecisionAction dynamic item itself (component interactions route to the
+        # authoring client). Also create the decision tables here so the listener
+        # works even if it starts before the events bot finishes its own setup.
+        from src.db.session import ensure_decision_tables, get_engine
+        ensure_decision_tables(get_engine(config.DATABASE_URL))
+        from src.discord_ui.decision_views import DecisionAction
+        self.add_dynamic_items(DecisionAction)
+
+    async def on_ready(self) -> None:
+        log.info("decision bot online as %s", self.user)
+
+    async def on_message(self, message: discord.Message) -> None:
+        await _maybe_detect(self, message)
 
 
 def create_decision_bot() -> discord.Client:
     """The decision bot client with message-content intent and an on_message listener."""
-    intents = discord.Intents.default()
-    intents.message_content = True
-    client = discord.Client(intents=intents)
-
-    @client.event
-    async def on_ready():
-        log.info("decision bot online as %s", client.user)
-
-    @client.event
-    async def on_message(message: discord.Message) -> None:
-        await _maybe_detect(client, message)
-
-    return client
+    return DecisionBot()
 
 
 async def _maybe_detect(client: discord.Client, message: discord.Message) -> None:
@@ -38,6 +67,9 @@ async def _maybe_detect(client: discord.Client, message: discord.Message) -> Non
         return
     content = (message.content or "").strip()
     if len(content) < MIN_MESSAGE_CHARS:
+        return
+    if _throttled(message.channel.id):
+        log.info("decision detection throttled in channel %s", message.channel.id)
         return
 
     from src.db.repositories import get_or_create_decision_config, list_decision_channels

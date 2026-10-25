@@ -13,6 +13,7 @@ from src.db.models import Decision
 from src.db.repositories import (
     add_decision, get_confirmed_unsynced_decisions, set_decision_status,
 )
+from src.services import trello_service
 
 log = logging.getLogger("hightide.decisions")
 
@@ -157,7 +158,6 @@ async def sync_decision_to_trello(session: Session, decision: Decision, *,
         get_or_create_decision_config, get_trello_member, get_trello_sync,
         record_trello_sync,
     )
-    from src.services import trello_service
     from zoneinfo import ZoneInfo
 
     if get_trello_sync(session, decision.id) is not None:
@@ -166,7 +166,7 @@ async def sync_decision_to_trello(session: Session, decision: Decision, *,
     if not (cfg.enabled and cfg.trello_list_id):
         log.info("decision %s not synced: trello not configured/enabled", decision.id)
         return False
-    when = decision.created_at.astimezone(ZoneInfo("Australia/Perth")).strftime("%b %d %Y, %I:%M %p")
+    when = decision.created_at.astimezone(ZoneInfo(config.DEFAULT_TIMEZONE)).strftime("%b %d %Y, %I:%M %p")
     desc = trello_service.build_card_description(
         decider_name=decider_name, when=when, channel_name=channel_name,
         message_url=message_link(decision.guild_id, decision.channel_id, decision.message_id),
@@ -181,9 +181,14 @@ async def sync_decision_to_trello(session: Session, decision: Decision, *,
 
 
 async def handle_decision_action(interaction, action: str, decision_id: int) -> None:
-    """Confirm/Dismiss callback: resolve the decision, sync to Trello on confirm,
-    and edit the card to reflect the outcome."""
-    from src.discord_ui.decision_views import _esc
+    """Confirm/Dismiss callback: staff-only; resolves the decision, syncs to Trello on
+    confirm, and edits the card to reflect the outcome."""
+    # Staff-only: anyone who can see a monitored channel could otherwise push message
+    # content to Trello or dismiss decisions.
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "Only staff can confirm or dismiss decisions.", ephemeral=True)
+        return
 
     await interaction.response.defer()
     with _session() as session:
@@ -207,8 +212,10 @@ async def handle_decision_action(interaction, action: str, decision_id: int) -> 
             if embed is not None:
                 new_embed = discord.Embed(title="Decision confirmed",
                                           description=embed.description, color=0x1F8B4C)
-            await interaction.edit_original_response(
-                embed=new_embed, view=None)
+            try:
+                await interaction.edit_original_response(embed=new_embed, view=None)
+            except discord.HTTPException:
+                log.info("could not edit confirmed decision card %s", decision_id)
             await interaction.followup.send(
                 f"Decision confirmed{status_note}.", ephemeral=True)
         else:  # dismiss
@@ -222,5 +229,8 @@ async def handle_decision_action(interaction, action: str, decision_id: int) -> 
             if embed is not None:
                 new_embed = discord.Embed(title="Decision dismissed",
                                           description=embed.description, color=0x95A5A6)
-            await interaction.edit_original_response(embed=new_embed, view=None)
+            try:
+                await interaction.edit_original_response(embed=new_embed, view=None)
+            except discord.HTTPException:
+                log.info("could not edit dismissed decision card %s", decision_id)
             await interaction.followup.send("Dismissed.", ephemeral=True)

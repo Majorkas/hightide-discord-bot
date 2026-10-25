@@ -33,7 +33,11 @@ def main() -> None:
             "DECISION_BOT_TOKEN not set — running the events bot only")
 
     async def _gather():
-        await asyncio.gather(*coros)
+        # One bot's fatal error must not take down the other.
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                logging.getLogger("hightide").error("a bot exited with an error: %r", r)
 
     asyncio.run(_gather())
 

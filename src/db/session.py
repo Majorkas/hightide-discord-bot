@@ -8,7 +8,12 @@ log = logging.getLogger("hightide.db")
 
 
 def get_engine(url: str):
-    return create_engine(url, future=True)
+    engine = create_engine(url, future=True)
+    # WAL so the two bots sharing this file never read-block each other's writes.
+    if url.startswith("sqlite"):
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+    return engine
 
 
 def ensure_board_post_message_ids(engine) -> None:

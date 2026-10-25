@@ -1,5 +1,6 @@
 """Trello REST integration: create cards for confirmed decisions, assign mapped members."""
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -8,6 +9,13 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from src import config
 
 log = logging.getLogger("hightide.trello")
+
+_MD_SPECIAL = re.compile(r"([\\`*_\[\]()])")
+
+
+def _md(text: str) -> str:
+    """Escape Trello-markdown metacharacters in user-controlled text."""
+    return _MD_SPECIAL.sub(r"\\\1", text or "")
 
 API = "https://api.trello.com/1"
 _TIMEOUT = 10.0
@@ -59,28 +67,33 @@ async def create_card(list_id: str, name: str, desc: str,
         async with httpx.AsyncClient() as client:
             resp = await _post(client, f"{API}/cards", **params)
         if resp.status_code != 200:
-            log.warning("Trello create card returned %d: %s", resp.status_code, resp.text[:200])
+            # Never log the response/exception text: the request URL carries the API
+            # key+token and the card content in its query string.
+            log.warning("Trello create card returned HTTP %d", resp.status_code)
             return None
         data = resp.json()
         card_id, url = data.get("id"), data.get("url") or data.get("shortUrl")
         if not isinstance(card_id, str) or not card_id:
-            log.warning("Trello create card returned no id: %s", str(data)[:200])
+            log.warning("Trello create card returned no usable id")
             return None
         return TrelloCard(card_id, url if isinstance(url, str) else None)
+    except httpx.HTTPStatusError as e:
+        log.warning("Trello create card failed: HTTP %d", e.response.status_code)
+        return None
     except (httpx.HTTPError, ValueError, TypeError, KeyError) as e:
-        log.warning("Trello create card failed: %r", e)
+        log.warning("Trello create card failed: %s", type(e).__name__)
         return None
 
 
 def build_card_description(*, decider_name: str, when: str, channel_name: str,
                            message_url: str | None, excerpt: str) -> str:
-    """Markdown body for the decision's Trello card (all user content pre-escaped by caller)."""
+    """Markdown body for the decision's Trello card; user content is markdown-escaped here."""
     lines = [
-        f"**Decided by:** {decider_name}",
-        f"**When:** {when}",
-        f"**Channel:** {channel_name}",
+        f"**Decided by:** {_md(decider_name)}",
+        f"**When:** {_md(when)}",
+        f"**Channel:** {_md(channel_name)}",
     ]
     if message_url:
         lines.append(f"**Source:** {message_url}")
-    lines += ["", "**Excerpt:**", excerpt]
+    lines += ["", "**Excerpt:**", _md(excerpt)]
     return "\n".join(lines)

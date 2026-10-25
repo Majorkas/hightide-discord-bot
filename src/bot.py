@@ -96,9 +96,9 @@ def create_bot() -> commands.Bot:
         ensure_card_wants_printing_columns(engine)
         ensure_decision_tables(engine)
         register_persistent_views(bot, get_session_factory(config.DATABASE_URL))
-        from src.discord_ui.decision_views import DecisionAction
         from src.discord_ui.role_views import NextWeekButton, SignupButton
-        bot.add_dynamic_items(SignupButton, NextWeekButton, DecisionAction)  # custom_id carries state
+        # DecisionAction is registered on the decision bot (it authors those cards).
+        bot.add_dynamic_items(SignupButton, NextWeekButton)  # custom_id carries state
         from src.services.scheduler import RefreshScheduler
         RefreshScheduler(bot).start()
         if config.GUILD_ID:

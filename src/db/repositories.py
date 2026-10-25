@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -217,15 +217,23 @@ def get_decision(session: Session, guild_id: int, decision_id: int) -> Decision 
 
 def set_decision_status(session: Session, guild_id: int, decision_id: int, status: str,
                         confirmed_by: int | None = None) -> Decision | None:
-    d = get_decision(session, guild_id, decision_id)
-    if d is None:
-        return None
-    d.status = status
+    """Transition a *pending* decision; None when unknown or already resolved (atomic)."""
+    now = datetime.now(timezone.utc)
+    values: dict = {"status": status}
     if status == "confirmed":
-        d.confirmed_by = confirmed_by
-        d.confirmed_at = datetime.now(timezone.utc)
+        values["confirmed_by"] = confirmed_by
+        values["confirmed_at"] = now
+    stmt = (
+        update(Decision)
+        .where(Decision.guild_id == guild_id, Decision.id == decision_id,
+               Decision.status == "pending")
+        .values(**values)
+    )
+    result = session.execute(stmt)
     session.commit()
-    return d
+    if result.rowcount == 0:
+        return None
+    return get_decision(session, guild_id, decision_id)
 
 
 def list_decisions(session: Session, guild_id: int, status: str | None = None) -> list[Decision]:
@@ -256,7 +264,7 @@ def record_trello_sync(session: Session, decision_id: int, card_id: str,
 
 
 def get_trello_sync(session: Session, decision_id: int) -> TrelloSync | None:
-    return session.get(TrelloSync, decision_id) or session.execute(
+    return session.execute(
         select(TrelloSync).where(TrelloSync.decision_id == decision_id)).scalar_one_or_none()
 
 

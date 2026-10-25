@@ -152,3 +152,65 @@ def test_dismiss_marks_rejected(session):
 def test_confirm_unknown_returns_none(session):
     assert confirm_decision(session, GUILD, 9999, 1) is None
     assert dismiss_decision(session, GUILD, 9999) is None
+
+
+# --- sync_decision_to_trello branches (council: previously always mocked) ---
+
+def _syncable(session, *, enabled=True, list_id="list1"):
+    from src.db.models import DecisionConfig
+    cfg = DecisionConfig(guild_id=GUILD, enabled=enabled, trello_board_id="b",
+                         trello_list_id=list_id)
+    session.add(cfg)
+    session.commit()
+
+
+async def test_sync_returns_false_when_list_unset(session, monkeypatch):
+    _syncable(session, enabled=True, list_id=None)
+    d = create_pending_decision(session, GUILD, 1, 2, 3, "raw", "Decided X")
+    confirm_decision(session, GUILD, d.id, confirmed_by=1)
+    create = AsyncMock()
+    monkeypatch.setattr(decision_service.trello_service, "create_card", create)
+    assert await decision_service.sync_decision_to_trello(
+        session, d, decider_name="Sam", channel_name="#staff") is False
+    create.assert_not_awaited()
+
+
+async def test_sync_success_records_row_and_assigns_member(session, monkeypatch):
+    from src.db.repositories import set_trello_member
+    _syncable(session)
+    set_trello_member(session, GUILD, 3, "trello_abc")
+    d = create_pending_decision(session, GUILD, 1, 2, 3, "raw", "Decided X")
+    confirm_decision(session, GUILD, d.id, confirmed_by=1)
+    card = decision_service.trello_service.TrelloCard("card1", "https://trello.com/c/card1")
+    create = AsyncMock(return_value=card)
+    monkeypatch.setattr(decision_service.trello_service, "create_card", create)
+    assert await decision_service.sync_decision_to_trello(
+        session, d, decider_name="Sam", channel_name="#staff") is True
+    # member assignment passed through
+    assert create.call_args.kwargs["member_id"] == "trello_abc"
+    # sync row recorded
+    from src.db.repositories import get_trello_sync
+    assert get_trello_sync(session, d.id).trello_card_id == "card1"
+
+
+async def test_sync_short_circuits_when_already_synced(session, monkeypatch):
+    _syncable(session)
+    d = create_pending_decision(session, GUILD, 1, 2, 3, "raw", "Decided X")
+    confirm_decision(session, GUILD, d.id, confirmed_by=1)
+    from src.db.repositories import record_trello_sync
+    record_trello_sync(session, d.id, "card1", None)
+    create = AsyncMock()
+    monkeypatch.setattr(decision_service.trello_service, "create_card", create)
+    assert await decision_service.sync_decision_to_trello(
+        session, d, decider_name="Sam", channel_name="#staff") is True
+    create.assert_not_awaited()  # no duplicate card
+
+
+async def test_sync_returns_false_when_create_fails(session, monkeypatch):
+    _syncable(session)
+    d = create_pending_decision(session, GUILD, 1, 2, 3, "raw", "Decided X")
+    confirm_decision(session, GUILD, d.id, confirmed_by=1)
+    monkeypatch.setattr(decision_service.trello_service, "create_card",
+                        AsyncMock(return_value=None))
+    assert await decision_service.sync_decision_to_trello(
+        session, d, decider_name="Sam", channel_name="#staff") is False
