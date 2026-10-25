@@ -32,6 +32,9 @@ A separate Discord bot (same process) can watch staff channels for decisions and
 - **`/decision map <@user> <trello_member_id>` / `unmap <@user>`** — Discord→Trello member assignment.
 - **`/decision list [status]`**, **`/decision create <summary>`**, **`/decision sync`** (retry unsynced).
 
+
+
+https://discord.com/oauth2/authorize?client_id=1563879286677446676&scope=bot&permissions=277025392640
 ## Setup
 
 ### Requirements

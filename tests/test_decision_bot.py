@@ -15,6 +15,13 @@ GUILD = 4242
 CHANNEL = 555
 
 
+@pytest.fixture(autouse=True)
+def _clear_throttle():
+    decision_bot._channel_windows.clear()
+    yield
+    decision_bot._channel_windows.clear()
+
+
 @pytest.fixture
 def db(tmp_path, monkeypatch):
     url = f"sqlite:///{tmp_path / 'dbot.db'}"
@@ -49,6 +56,65 @@ def _message(content, author_bot=False, channel_id=CHANNEL, in_guild=True):
 
 def _client():
     return MagicMock()
+
+
+def _history_message(text, author_name):
+    m = MagicMock()
+    m.content = text
+    m.author = MagicMock(bot=False, display_name=author_name)
+    return m
+
+
+class _History:
+    """Async-iterable channel.history returning the given messages (already oldest-last)."""
+
+    def __init__(self, messages):
+        self._messages = messages
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return self._messages.pop(0)
+
+
+async def test_recent_context_includes_back_and_forth(db, monkeypatch):
+    """An agreement message is judged with the proposals it resolves."""
+    _enabled(db)
+    captured = []
+    monkeypatch.setattr(decision_service, "detect_decision",
+                        AsyncMock(side_effect=lambda conv: captured.append(list(conv)) or
+                                    decision_service.DetectionResult(True, "Price set at $175", "")))
+    m = _message("ok, let's settle on 175 for it then")
+    m.author.bot = False
+    m.author.display_name = "Sam"
+    # Discord's history(oldest_first=False) yields newest first; _recent_context reverses it.
+    m.channel.history = lambda **kw: _History([
+        _history_message("nah too low, 200", "Sam"),   # newest of the two first
+        _history_message("I reckon 150 for it", "Jo"),
+    ])
+    await _maybe_detect(_client(), m)
+    assert captured, "detect_decision was not called"
+    conv = captured[0]
+    # oldest first, current message last, names attached
+    assert conv[0].startswith("Jo:") and "150" in conv[0]
+    assert conv[1].startswith("Sam:") and "200" in conv[1]
+    assert conv[-1].startswith("Sam:") and "175" in conv[-1]
+    m.channel.send.assert_awaited_once()  # decision posted
+
+
+async def test_recent_context_falls_back_to_current_when_history_fails(db, monkeypatch):
+    _enabled(db)
+    captured = []
+    monkeypatch.setattr(decision_service, "detect_decision",
+                        AsyncMock(side_effect=lambda conv: captured.append(list(conv)) or
+                                    decision_service.DetectionResult(True, "X", "")))
+    m = _message("we decided to do the thing today for sure")
+    m.channel.history = MagicMock(side_effect=discord.Forbidden(MagicMock(status=403), "no"))
+    await _maybe_detect(_client(), m)
+    assert captured and captured[0][-1].endswith("the thing today for sure")
 
 
 async def test_detects_decision_in_monitored_channel(db, monkeypatch):

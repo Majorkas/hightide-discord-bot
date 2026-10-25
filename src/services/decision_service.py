@@ -36,10 +36,13 @@ MAX_SUMMARY_CHARS = 200   # AI one-liner cap
 _TIMEOUT = 8.0
 
 _SYSTEM = (
-    "You detect decisions in a small hobby-store staff Discord. A decision is a concrete "
-    "choice the team has settled on (e.g. \"we'll run Friday drafts at 7pm\", \"ordering the "
-    "new set\", \"cancel the league\"). Casual chat, questions, and proposals with no agreement "
-    "are NOT decisions. Reply with strict JSON only: "
+    "You detect decisions in a small hobby-store staff Discord. You are given the most recent "
+    "messages in a channel, oldest first, as 'Name: text' lines. The LAST line is the message "
+    "being judged; earlier lines are context. A decision is a concrete choice the team has "
+    "settled on — including a resolution reached after back-and-forth (e.g. one person says 150, "
+    "another 200, then they agree on 175 — the LAST line confirming it is the decision, and the "
+    "summary must carry the resolved value, e.g. 'Price set at 175'). Casual chat, questions, and "
+    "proposals with no agreement are NOT decisions. Reply with strict JSON only: "
     '{"is_decision": true|false, "summary": "<=200 char one-line summary of the decision", '
     '"decider_hint": "who settled it, if clear, else empty"}.'
 )
@@ -97,10 +100,18 @@ async def _call_openai(client: httpx.AsyncClient, text: str) -> httpx.Response:
     return resp
 
 
-async def detect_decision(text: str) -> DetectionResult | None:
-    """Detect whether `text` contains a decision; None on API failure (never raises)."""
-    if not config.OPENAI_API_KEY or not (text or "").strip():
+async def detect_decision(conversation: list[str] | str) -> DetectionResult | None:
+    """Detect whether the latest line of `conversation` settles a decision.
+
+    `conversation` is a list of 'Name: text' lines (oldest first; the LAST line is the
+    message being judged) or a single bare string. None on API failure (never raises).
+    """
+    if isinstance(conversation, str):
+        conversation = [conversation]
+    lines = [c for c in conversation if (c or "").strip()]
+    if not config.OPENAI_API_KEY or not lines:
         return None
+    text = "\n".join(lines)
     try:
         async with httpx.AsyncClient() as client:
             resp = await _call_openai(client, text)

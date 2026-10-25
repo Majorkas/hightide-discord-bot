@@ -60,6 +60,33 @@ def create_decision_bot() -> discord.Client:
     return DecisionBot()
 
 
+CONTEXT_MESSAGES = 10  # how far back to read for back-and-forth context
+
+
+async def _recent_context(message: discord.Message) -> list[str]:
+    """Recent channel history as 'Name: text' lines, oldest first, ending with this message.
+
+    The current message is always the LAST line (the one being judged). Falls back to
+    just this message when history can't be read. Bot messages are excluded.
+    """
+    def _line(m) -> str:
+        name = getattr(m.author, "display_name", None) or "someone"
+        return f"{name}: {(m.content or '').strip()}"
+
+    current = _line(message)
+    try:
+        history = []
+        async for m in message.channel.history(limit=CONTEXT_MESSAGES - 1,
+                                               before=message, oldest_first=False):
+            if m.author.bot or not (m.content or "").strip():
+                continue
+            history.append(_line(m))
+        history.reverse()  # oldest first
+        return [*history, current]
+    except (discord.HTTPException, AttributeError):
+        return [current]
+
+
 async def _maybe_detect(client: discord.Client, message: discord.Message) -> None:
     """Detect a decision in a monitored channel and post a confirmation card."""
     # Never react to bots (incl. ourselves), DMs, or empty/short text.
@@ -82,10 +109,14 @@ async def _maybe_detect(client: discord.Client, message: discord.Message) -> Non
         if message.channel.id not in list_decision_channels(session, message.guild.id):
             return
 
-        result = await decision_service.detect_decision(content)
-        if result is None or not result.is_decision:
-            return
+    # Pull recent history so a back-and-forth agreement ("ok, 175 it is") is judged
+    # with the proposals it resolves, not in isolation.
+    conversation = await _recent_context(message)
+    result = await decision_service.detect_decision(conversation)
+    if result is None or not result.is_decision:
+        return
 
+    with decision_service._session() as session:
         decision = decision_service.create_pending_decision(
             session, message.guild.id, message.channel.id, message.id,
             message.author.id, content, result.summary or content[:200])
