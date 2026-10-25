@@ -111,8 +111,9 @@ async def test_setup_hook_registers_dynamic_signup_button(tmp_path, monkeypatch)
     bot.add_dynamic_items = MagicMock()
     bot.tree.sync = AsyncMock()
     await bot.setup_hook()
+    from src.discord_ui.decision_views import DecisionAction
     from src.discord_ui.role_views import NextWeekButton
-    bot.add_dynamic_items.assert_called_once_with(SignupButton, NextWeekButton)
+    bot.add_dynamic_items.assert_called_once_with(SignupButton, NextWeekButton, DecisionAction)
 
 
 # ---- toggle callback ----
