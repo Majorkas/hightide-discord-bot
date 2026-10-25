@@ -104,14 +104,14 @@ async def test_empty_week_board_header_has_next_week_button(session):
     assert "view" in header and isinstance(header["view"], NextWeekView)
 
 
-async def test_nonempty_week_board_header_has_no_next_week_button(session):
+async def test_nonempty_week_board_header_also_has_next_week_button(session):
     session.add(_cfg())
     session.add(_event("a", datetime.now(TZ) + timedelta(hours=3)))
     session.commit()
     channel = _Channel()
     await upsert_board(_bot(channel), session, GUILD, "this_week")
     header = channel.sends[0]
-    assert "view" not in header or header.get("view") is None
+    assert isinstance(header.get("view"), NextWeekView)
 
 
 # --- the ephemeral preview ---

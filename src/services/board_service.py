@@ -352,15 +352,14 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
               else _weekly_hash(embed) if k == "weekly" else _embed_hash(embed)
               for k, embed in items}
     no_mentions = discord.AllowedMentions.none()
-    # When no dated events remain this week, offer an ephemeral next-week preview.
-    has_dated = any(e.starts_at is not None for e in events)
-    header_view = None if has_dated else NextWeekView()
+    # The header always offers an ephemeral next-week preview.
+    header_view = NextWeekView()
 
     def _card_kwargs(key: str, embed) -> dict:
         kwargs = {"embed": embed, "allowed_mentions": no_mentions}
         if key in by_id:
             kwargs["view"] = SignupView(by_id[key].id, counts[key])
-        elif key == "header" and header_view is not None:
+        elif key == "header":
             kwargs["view"] = header_view
         return kwargs
 
@@ -380,10 +379,8 @@ async def _upsert_week_set(bot, session: Session, guild_id: int, cfg, tz, events
         # describe a different (now-recreated) card set than the kept header message shows,
         # which froze the header with stale entries; an unconditional edit keeps them in sync.
         try:
-            header_kwargs = {"embed": items[0][1], "allowed_mentions": no_mentions}
-            if header_view is not None:
-                header_kwargs["view"] = header_view
-            await header_msg.edit(**header_kwargs)
+            await header_msg.edit(embed=items[0][1], allowed_mentions=no_mentions,
+                                  view=header_view)
             changed = True
         except discord.NotFound:
             log.info("board header message missing for this_week, recreating set")

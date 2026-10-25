@@ -327,7 +327,6 @@ async def test_week_cards_get_signup_view_with_db_count(session):
     assert await upsert_board(_board_bot(channel), session, GUILD, "this_week") == "created"
 
     header, card = channel.sends
-    assert "view" not in header
     assert card["view"].children[0].custom_id == f"signup:{event.id}"
     assert card["view"].children[0].label == "✅ Going (2)"
 
@@ -676,17 +675,21 @@ async def test_only_event_cards_carry_views(session):
 
     by_title = {s["embed"].title: s for s in channel.sends}
     assert len(channel.sends) == 11
-    for title in ("This Week at Hightide", "Also this week", "Every week at Hightide",
-                  "Date TBA"):
+    # event cards carry SignupView; the header carries NextWeekView; nothing else has a view
+    from src.discord_ui.role_views import NextWeekView, SignupView
+    assert isinstance(by_title["This Week at Hightide"]["view"], NextWeekView)
+    for title in ("Also this week", "Every week at Hightide", "Date TBA"):
         assert "view" not in by_title[title]
-    assert sum(1 for s in channel.sends if "view" in s) == 7
+    assert sum(1 for s in channel.sends if isinstance(s.get("view"), SignupView)) == 7
 
     cfg = session.get(GuildConfig, GUILD)
     cfg.weekly_image_url = "https://x/other.png"
     session.commit()
     await upsert_board(bot, session, GUILD, "this_week")
     edited = [e for m in channel.messages.values() for e in m.edits]
-    assert edited and all("view" not in e for e in edited)
+    # only the weekly card re-edits (image change); the header re-sync carries its NextWeek view
+    assert edited and all(isinstance(e.get("view"), (SignupView, NextWeekView)) or "view" not in e
+                          for e in edited)
 
 
 # ---- recreate path ----
@@ -708,8 +711,9 @@ async def test_recreate_this_week_keeps_signup_counts(db, interaction):
     cog = AdminCog(_board_bot(channel))
     await cog.board_recreate.callback(cog, interaction, "this_week")
 
+    from src.discord_ui.role_views import SignupView
     cards = {s["view"].children[0].custom_id: s["view"].children[0].label
-             for s in channel.sends if "view" in s}
+             for s in channel.sends if isinstance(s.get("view"), SignupView)}
     assert cards == {f"signup:{first}": "✅ Going (2)", f"signup:{second}": "✅ Going (1)"}
     assert "recreate failed" not in str(interaction.followup.send.call_args)
 
