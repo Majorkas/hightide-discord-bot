@@ -91,7 +91,7 @@ def test_command_surface():
         "card", "deck"}
     # Only the Manage-Guild groups are gated; subcommands never carry their own gate.
     gated = {n for n, c in groups.items() if c.default_permissions is not None}
-    assert gated == {"config", "source", "board", "roles"}
+    assert gated == {"config", "source", "board", "roles", "decision"}
     for g in groups.values():
         for sub in getattr(g, "commands", []):
             assert sub.default_permissions is None
