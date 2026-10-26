@@ -104,6 +104,41 @@ class DecisionCog(commands.Cog):
         return [app_commands.Choice(name=o, value=o) for o in opts
                 if current.lower() in o]
 
+    @decision_group.command(name="meetings_channel",
+                            description="Channel where meeting recordings are transcribed")
+    async def meetings_channel(self, interaction: discord.Interaction,
+                               channel: discord.TextChannel) -> None:
+        with _session() as session:
+            cfg = get_or_create_decision_config(session, interaction.guild_id)
+            cfg.meetings_channel_id = channel.id
+            session.commit()
+        await interaction.response.send_message(
+            f"Meeting recordings dropped in {channel.mention} will be transcribed and "
+            "summarised.", ephemeral=True)
+
+    @decision_group.command(name="meetings", description="List past meeting notes")
+    async def meetings(self, interaction: discord.Interaction) -> None:
+        from src.db.repositories import list_meetings
+        from src import config as _config
+        with _session() as session:
+            rows = list_meetings(session, interaction.guild_id)
+            tz = ZoneInfo(_config.DEFAULT_TIMEZONE)
+        if not rows:
+            await interaction.response.send_message(
+                "No meetings recorded yet. Drop a recording in the meetings channel.",
+                ephemeral=True)
+            return
+        lines = [
+            f"#{m.id} **{_esc(m.filename)}** · {m.created_at.astimezone(tz).strftime('%b %d %H:%M')}\n"
+            f"  {_esc(m.summary[:120])}"
+            for m in rows
+        ]
+        text = "\n".join(lines)
+        if len(text) > _MAX_MESSAGE_CHARS:
+            text = text[:_MAX_MESSAGE_CHARS - 20].rsplit("\n", 1)[0] + "\n…"
+        await interaction.response.send_message(text, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
     @decision_group.command(name="map", description="Map a Discord user to a Trello member")
     async def map_member(self, interaction: discord.Interaction, user: discord.Member,
                          trello_member_id: str) -> None:

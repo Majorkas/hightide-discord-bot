@@ -110,6 +110,35 @@ async def test_config_board_requires_both_ids(db, cog):
     assert "both" in i.response.send_message.call_args.args[0]
 
 
+# --- meetings_channel + meetings ---
+
+async def test_meetings_channel_sets_config(db, cog):
+    i = _interaction()
+    await cog.meetings_channel.callback(cog, i, _channel(777))
+    with db() as s:
+        from src.db.repositories import get_or_create_decision_config
+        assert get_or_create_decision_config(s, GUILD).meetings_channel_id == 777
+    assert "777" in i.response.send_message.call_args.args[0] or "transcribed" in i.response.send_message.call_args.args[0]
+
+
+async def test_meetings_empty(db, cog):
+    i = _interaction()
+    await cog.meetings.callback(cog, i)
+    assert "No meetings" in i.response.send_message.call_args.args[0]
+
+
+async def test_meetings_lists_past(db, cog):
+    with db() as s:
+        from src.db.repositories import add_meeting
+        add_meeting(s, GUILD, 777, "staff.mp3", "Discussed the new deckboxes", "excerpt")
+        s.commit()
+    i = _interaction()
+    await cog.meetings.callback(cog, i)
+    text = i.response.send_message.call_args.args[0]
+    assert "staff.mp3" in text and "deckboxes" in text
+    assert i.response.send_message.call_args.kwargs["ephemeral"] is True
+
+
 async def test_config_board_sets_target(db, cog):
     i = _interaction()
     await cog.decision_config.callback(cog, i, "board", board_id="b1", list_id="l1")
