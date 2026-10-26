@@ -141,3 +141,92 @@ async def transcribe_audio(data: bytes, filename: str) -> TranscriptResult:
         # best-effort cleanup of temp chunks
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# --- notes + decisions extraction (GPT) ---
+
+OPENAI_CHAT_API = "https://api.openai.com/v1/chat/completions"
+NOTES_MODEL = "gpt-4o-mini"
+MAX_TRANSCRIPT_CHARS = 12000  # GPT input cap (meetings can be long)
+MAX_NOTES_CHARS = 1500
+_MAX_DECISIONS = 10
+
+_NOTES_SYSTEM = (
+    "You summarise a hobby-store staff meeting transcript. Reply with strict JSON only: "
+    '{"notes": "<=1200 char bulleted key points, one per line starting with - ", '
+    '"decisions": ["<one-line decision naming the subject and the outcome>", ...]}. '
+    "Decisions are concrete choices the team settled on (name the subject AND the outcome, "
+    "resolving pronouns to the thing discussed); omit proposals and chat. If none, use an "
+    "empty list."
+)
+
+
+@dataclass
+class MeetingNotes:
+    notes: str
+    decisions: list[str]
+
+
+def _parse_notes(raw: str) -> MeetingNotes | None:
+    import json
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    notes = data.get("notes")
+    notes = notes.strip()[:MAX_NOTES_CHARS] if isinstance(notes, str) else ""
+    decisions = data.get("decisions")
+    if isinstance(decisions, list):
+        decisions = [d.strip()[:200] for d in decisions
+                     if isinstance(d, str) and d.strip()][:_MAX_DECISIONS]
+    else:
+        decisions = []
+    if not notes and not decisions:
+        return None
+    return MeetingNotes(notes, decisions)
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=6),
+       retry=retry_if_exception(_is_retryable), reraise=True)
+async def _call_notes(client: httpx.AsyncClient, transcript: str) -> httpx.Response:
+    resp = await client.post(
+        OPENAI_CHAT_API,
+        headers={"Authorization": f"Bearer {config.OPENAI_API_KEY}"},
+        json={
+            "model": NOTES_MODEL,
+            "messages": [
+                {"role": "system", "content": _NOTES_SYSTEM},
+                {"role": "user", "content": transcript[:MAX_TRANSCRIPT_CHARS]},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0,
+            "max_tokens": 800,
+        },
+        timeout=_TIMEOUT)
+    if resp.status_code >= 500 or resp.status_code == 429:
+        resp.raise_for_status()
+    return resp
+
+
+async def extract_notes(transcript: str) -> MeetingNotes:
+    """Extract key notes + decisions from a transcript; MeetingError on failure."""
+    if not config.OPENAI_API_KEY:
+        raise MeetingError("note extraction isn't configured.")
+    if not (transcript or "").strip():
+        raise MeetingError("nothing to summarise — the transcript was empty.")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await _call_notes(client, transcript)
+        if resp.status_code != 200:
+            raise MeetingError(f"note extraction failed (HTTP {resp.status_code})")
+        content = resp.json()["choices"][0]["message"]["content"]
+    except MeetingError:
+        raise
+    except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as e:
+        raise MeetingError("note extraction failed — try again.") from e
+    notes = _parse_notes(content)
+    if notes is None:
+        raise MeetingError("note extraction returned an unreadable response.")
+    return notes
