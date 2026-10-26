@@ -53,13 +53,13 @@
 
 ## Tasks
 
-- [ ] **Task 1: DB + repos + DDL.** `Meeting` model, `ensure_meeting_tables` DDL, add/list repos, config reuse. Tests: repos + DDL idempotency.
-- [ ] **Task 2: meeting_service — download + chunk + transcribe.** Attachment download (size guard), pydub chunking (ffmpeg), Whisper transcription per chunk, ordered combine. Tests: mock httpx + pydub; chunking boundary; oversized/format rejection; Whisper failure isolation.
-- [ ] **Task 3: meeting_service — notes + decisions extraction.** GPT call producing `{summary, decisions[]}` (JSON mode, retry, subject+outcome rule). Tests: parse robustness, failure isolation, decision-list shape.
-- [ ] **Task 4: listener branch.** Audio-in-meetings-channel detection (content-type/extension), orchestrate the pipeline, post notes card + per-decision Confirm cards, store the Meeting row. Tests: filter branches (wrong channel, no audio, disabled, not audio), happy path, oversized rejection message, partial-failure cards.
-- [ ] **Task 5: admin commands + Dockerfile + deps.** `/decision meetings_channel`, `/decision meetings`; Dockerfile installs ffmpeg; pyproject adds pydub. Tests: commands happy/invalid; command-surface registration.
-- [ ] **Task 6: council + full pass.** 4-agent council (correctness/security/regressions/coverage), fix waves, README, full suite green.
-- [ ] **Task 7: deploy.** `fly deploy --ha=false`; go-live gate: upload a real short recording in the meetings channel and confirm a notes card + decision cards post.
+- [x] **Task 1: DB + repos + DDL.** `Meeting` model, `ensure_meeting_tables` DDL, add/list repos, config reuse. Tests: repos + DDL idempotency.
+- [x] **Task 2: meeting_service — download + chunk + transcribe.** Attachment download (size guard), pydub chunking (ffmpeg), Whisper transcription per chunk, ordered combine. Tests: mock httpx + pydub; chunking boundary; oversized/format rejection; Whisper failure isolation.
+- [x] **Task 3: meeting_service — notes + decisions extraction.** GPT call producing `{summary, decisions[]}` (JSON mode, retry, subject+outcome rule). Tests: parse robustness, failure isolation, decision-list shape.
+- [x] **Task 4: listener branch.** Audio-in-meetings-channel detection (content-type/extension), orchestrate the pipeline, post notes card + per-decision Confirm cards, store the Meeting row. Tests: filter branches (wrong channel, no audio, disabled, not audio), happy path, oversized rejection message, partial-failure cards.
+- [x] **Task 5: admin commands + Dockerfile + deps.** `/decision meetings_channel`, `/decision meetings`; Dockerfile installs ffmpeg; pyproject adds pydub. Tests: commands happy/invalid; command-surface registration.
+- [x] **Task 6: council + full pass.** 4-agent council (correctness/security/regressions/coverage), fix waves, README, full suite green.
+- [x] **Task 7: deploy.** `fly deploy --ha=false` (image 212MB, ffmpeg 7.1.5 verified on machine; both shards resumed after deploy). Remaining go-live gate: user uploads a real short recording in the meetings channel and confirms a notes card + decision cards post.
 
 ## Out of scope
 
