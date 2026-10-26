@@ -62,6 +62,18 @@ def test_candidate_embed_escapes_and_mentions_decider():
     assert "<@5>" not in e.description
 
 
+def test_candidate_embed_hides_duplicate_excerpt():
+    # Meeting-sourced decisions store content == summary; don't render it twice.
+    e = build_candidate_embed("Drafts start at 7pm", 7, "Drafts start at 7pm")
+    assert e.description.count("Drafts start at 7pm") == 1
+    assert "<@7>" in e.description
+
+
+def test_candidate_embed_shows_distinct_excerpt():
+    e = build_candidate_embed("Drafts start at 7pm", 7, "ok cool, 7 it is then")
+    assert "ok cool, 7 it is then" in e.description
+
+
 def test_decision_view_has_confirm_and_dismiss():
     v = DecisionView(5)
     ids = [c.custom_id for c in v.children]

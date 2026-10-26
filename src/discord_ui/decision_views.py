@@ -16,8 +16,15 @@ def _esc(s: str) -> str:
 
 
 def build_candidate_embed(summary: str, decider_id: int, excerpt: str) -> discord.Embed:
-    """The confirmation card the bot posts for an AI-detected decision."""
-    desc = f"**{_esc(summary)}**\n\n{_esc(excerpt)}\n\n— <@{decider_id}>"
+    """The confirmation card the bot posts for an AI-detected decision.
+
+    The excerpt (original message text) is only shown when it adds context beyond the
+    summary — meeting-sourced decisions store content == summary, so we'd duplicate.
+    """
+    if excerpt.strip() and excerpt.strip() != summary.strip():
+        desc = f"**{_esc(summary)}**\n\n{_esc(excerpt)}\n\n— <@{decider_id}>"
+    else:
+        desc = f"**{_esc(summary)}**\n\n— <@{decider_id}>"
     embed = discord.Embed(title="Decision detected — confirm?", description=desc,
                           color=0xF0A832)
     return embed
