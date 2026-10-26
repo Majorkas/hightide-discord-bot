@@ -45,8 +45,10 @@ class DecisionBot(discord.Client):
         # DecisionAction dynamic item itself (component interactions route to the
         # authoring client). Also create the decision tables here so the listener
         # works even if it starts before the events bot finishes its own setup.
-        from src.db.session import ensure_decision_tables, get_engine
-        ensure_decision_tables(get_engine(config.DATABASE_URL))
+        from src.db.session import ensure_decision_tables, ensure_meeting_tables, get_engine
+        engine = get_engine(config.DATABASE_URL)
+        ensure_decision_tables(engine)
+        ensure_meeting_tables(engine)
         from src.discord_ui.decision_views import DecisionAction
         self.add_dynamic_items(DecisionAction)
 

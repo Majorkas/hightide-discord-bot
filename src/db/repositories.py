@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from src.db.models import (
     BoardPost, Decision, DecisionChannel, DecisionConfig, Event, EventRolePing,
-    EventSignup, EventSource, GuildConfig, InterestRole, ProductAlert, RoleKeyword,
+    EventSignup, EventSource, GuildConfig, InterestRole, Meeting, ProductAlert, RoleKeyword,
     TrelloMemberMap, TrelloSync,
 )
 
@@ -325,3 +325,21 @@ def remove_trello_member(session: Session, guild_id: int, discord_user_id: int) 
     result = session.execute(stmt)
     session.commit()
     return result.rowcount > 0
+
+
+# --- meeting notes ---
+
+
+def add_meeting(session: Session, guild_id: int, channel_id: int, filename: str,
+                summary: str, transcript_excerpt: str) -> Meeting:
+    m = Meeting(guild_id=guild_id, channel_id=channel_id, filename=filename,
+                summary=summary, transcript_excerpt=transcript_excerpt)
+    session.add(m)
+    session.commit()
+    return m
+
+
+def list_meetings(session: Session, guild_id: int, limit: int = 25) -> list[Meeting]:
+    stmt = (select(Meeting).where(Meeting.guild_id == guild_id)
+            .order_by(Meeting.created_at.desc(), Meeting.id.desc()).limit(limit))
+    return list(session.execute(stmt).scalars())

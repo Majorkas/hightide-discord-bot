@@ -105,5 +105,16 @@ def ensure_decision_tables(engine) -> None:
         log.info("created decision-bot table %s", table.name)
 
 
+def ensure_meeting_tables(engine) -> None:
+    """Create the meetings table on pre-existing DBs (fresh DBs get it via create_all)."""
+    from src.db.models import Meeting
+    try:
+        with engine.begin() as conn:
+            Meeting.__table__.create(conn, checkfirst=True)
+    except OperationalError:
+        return  # already exists
+    log.info("created meetings table")
+
+
 def get_session_factory(url: str) -> sessionmaker:
     return sessionmaker(bind=get_engine(url), expire_on_commit=False, future=True)

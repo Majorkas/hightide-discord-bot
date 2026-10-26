@@ -16,7 +16,7 @@ from src.db.session import (  # noqa: E402
     ensure_board_post_message_ids, ensure_card_wants_printing_columns,
     ensure_decision_tables, ensure_guild_config_v2_columns,
     ensure_guild_config_weekly_image_url, ensure_guild_config_weekly_seeded,
-    get_engine, get_session_factory,
+    ensure_meeting_tables, get_engine, get_session_factory,
 )
 
 log = logging.getLogger("hightide")
@@ -95,6 +95,7 @@ def create_bot() -> commands.Bot:
         ensure_guild_config_v2_columns(engine)
         ensure_card_wants_printing_columns(engine)
         ensure_decision_tables(engine)
+        ensure_meeting_tables(engine)
         register_persistent_views(bot, get_session_factory(config.DATABASE_URL))
         from src.discord_ui.role_views import NextWeekButton, SignupButton
         # DecisionAction is registered on the decision bot (it authors those cards).

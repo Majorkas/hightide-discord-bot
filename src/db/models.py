@@ -255,3 +255,15 @@ class TrelloMemberMap(Base):
     guild_id: Mapped[int] = mapped_column(BigInteger)
     discord_user_id: Mapped[int] = mapped_column(BigInteger)
     trello_member_id: Mapped[str] = mapped_column(String)
+
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger)
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    filename: Mapped[str] = mapped_column(String)
+    summary: Mapped[str] = mapped_column(String)            # key points
+    transcript_excerpt: Mapped[str] = mapped_column(String)  # capped at ingest
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=_utcnow)
