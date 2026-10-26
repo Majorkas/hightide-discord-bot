@@ -236,6 +236,7 @@ class DecisionConfig(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     trello_board_id: Mapped[str | None] = mapped_column(String, nullable=True)
     trello_list_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    meetings_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class DecisionChannel(Base):

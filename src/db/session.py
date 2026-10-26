@@ -106,14 +106,24 @@ def ensure_decision_tables(engine) -> None:
 
 
 def ensure_meeting_tables(engine) -> None:
-    """Create the meetings table on pre-existing DBs (fresh DBs get it via create_all)."""
+    """Create the meetings table + decision_config.meetings_channel_id on pre-existing DBs."""
     from src.db.models import Meeting
     try:
         with engine.begin() as conn:
             Meeting.__table__.create(conn, checkfirst=True)
     except OperationalError:
-        return  # already exists
-    log.info("created meetings table")
+        pass  # already exists
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE decision_config ADD COLUMN meetings_channel_id BIGINT"))
+    except OperationalError as exc:
+        # "duplicate column" (already added) or "no such table" (decision_config not yet
+        # created on a fresh DB — create_all adds the column via the model) are both fine.
+        if "duplicate column" not in str(exc).lower() and "no such table" not in str(exc).lower():
+            raise
+        return
+    log.info("ensured meetings table + meetings_channel_id column")
 
 
 def get_session_factory(url: str) -> sessionmaker:

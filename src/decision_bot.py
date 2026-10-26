@@ -56,6 +56,10 @@ class DecisionBot(discord.Client):
         log.info("decision bot online as %s", self.user)
 
     async def on_message(self, message: discord.Message) -> None:
+        # A meeting recording is its own pipeline; otherwise try decision detection.
+        if _is_meeting_upload(message):
+            await _process_meeting(self, message)
+            return
         await _maybe_detect(self, message)
 
 
@@ -147,6 +151,83 @@ async def _maybe_detect(client: discord.Client, message: discord.Message) -> Non
                                    reference=message)
     except discord.HTTPException:
         log.exception("could not post decision confirmation for decision %s", decision.id)
+
+
+def _is_meeting_upload(message: discord.Message) -> bool:
+    """True when the message carries an audio attachment in a guild (meetings channel checked
+    by the caller against config)."""
+    if message.author.bot or message.guild is None or not message.attachments:
+        return False
+    from src.services.meeting_service import is_audio_attachment
+    return any(
+        is_audio_attachment(a.filename, getattr(a, "content_type", None))
+        for a in message.attachments
+    )
+
+
+async def _process_meeting(client: discord.Client, message: discord.Message) -> None:
+    """Transcribe an uploaded meeting recording, post notes, and raise decision cards."""
+    from src.db.repositories import add_meeting, get_or_create_decision_config
+    from src.discord_ui.decision_views import DecisionView, build_candidate_embed
+    from src.discord_ui.decision_views import _esc
+    from src.services import decision_service, meeting_service
+
+    with decision_service._session() as session:
+        cfg = get_or_create_decision_config(session, message.guild.id)
+        if not cfg.enabled or cfg.meetings_channel_id != message.channel.id:
+            return
+
+    attachment = next(
+        (a for a in message.attachments
+         if meeting_service.is_audio_attachment(a.filename, getattr(a, "content_type", None))),
+        None)
+    if attachment is None:
+        return
+
+    async def _reply(text: str) -> None:
+        await message.channel.send(text, reference=message,
+                                   allowed_mentions=discord.AllowedMentions.none())
+
+    try:
+        data = await meeting_service.download_attachment(attachment.url)
+        transcript = await meeting_service.transcribe_audio(data, attachment.filename)
+        notes = await meeting_service.extract_notes(transcript.text)
+    except meeting_service.MeetingError as e:
+        await _reply(f"⚠️ Couldn't process that recording: {_esc(str(e))}")
+        return
+    except Exception:
+        log.exception("meeting processing failed for %s", attachment.filename)
+        await _reply("⚠️ Something went wrong processing that recording — try again.")
+        return
+
+    # Post the key-notes card.
+    notes_embed = discord.Embed(
+        title=f"Meeting notes — {_esc(attachment.filename[:80])}",
+        description=_esc(notes.notes)[:4000] or "(no key points extracted)",
+        color=0x1F8B4C)
+    try:
+        await message.channel.send(embed=notes_embed,
+                                   allowed_mentions=discord.AllowedMentions.none(),
+                                   reference=message)
+    except discord.HTTPException:
+        log.exception("could not post meeting notes for %s", attachment.filename)
+
+    # Store the meeting and raise a Confirm card per detected decision.
+    with decision_service._session() as session:
+        add_meeting(session, message.guild.id, message.channel.id, attachment.filename,
+                    notes.notes[:1500], transcript.text[:500])
+        for summary in notes.decisions:
+            decision = decision_service.create_pending_decision(
+                session, message.guild.id, message.channel.id, message.id,
+                message.author.id, summary, summary)
+            try:
+                await message.channel.send(
+                    embed=build_candidate_embed(decision.summary, message.author.id,
+                                                decision.content),
+                    view=DecisionView(decision.id),
+                    allowed_mentions=discord.AllowedMentions.none())
+            except discord.HTTPException:
+                log.exception("could not post meeting decision card")
 
 
 async def run_decision_bot() -> None:
