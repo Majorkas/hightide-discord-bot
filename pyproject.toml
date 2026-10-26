@@ -30,4 +30,5 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = [
     "ignore:.*audioop.*:DeprecationWarning:discord",
+    "ignore:Couldn't find ffmpeg or avconv.*:RuntimeWarning:pydub",
 ]
