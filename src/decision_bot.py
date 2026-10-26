@@ -56,10 +56,18 @@ class DecisionBot(discord.Client):
         log.info("decision bot online as %s", self.user)
 
     async def on_message(self, message: discord.Message) -> None:
-        # A meeting recording is its own pipeline; otherwise try decision detection.
+        # Route by channel: a recording in the meetings channel goes through the
+        # meeting pipeline; anything else (including audio attachments in other
+        # channels) falls through to normal decision detection so it isn't lost.
+        from src.db.repositories import get_or_create_decision_config
+        from src.services import decision_service
         if _is_meeting_upload(message):
-            await _process_meeting(self, message)
-            return
+            with decision_service._session() as session:
+                cfg = get_or_create_decision_config(session, message.guild.id)
+                meetings_ch = cfg.meetings_channel_id if cfg.enabled else None
+            if meetings_ch == message.channel.id:
+                await _process_meeting(self, message)
+                return
         await _maybe_detect(self, message)
 
 
@@ -167,21 +175,31 @@ def _is_meeting_upload(message: discord.Message) -> bool:
 
 async def _process_meeting(client: discord.Client, message: discord.Message) -> None:
     """Transcribe an uploaded meeting recording, post notes, and raise decision cards."""
-    from src.db.repositories import add_meeting, get_or_create_decision_config
+    from src.db.repositories import add_meeting
     from src.discord_ui.decision_views import DecisionView, build_candidate_embed
     from src.discord_ui.decision_views import _esc
     from src.services import decision_service, meeting_service
 
-    with decision_service._session() as session:
-        cfg = get_or_create_decision_config(session, message.guild.id)
-        if not cfg.enabled or cfg.meetings_channel_id != message.channel.id:
-            return
+    # The meetings channel is checked by the caller (on_message); only staff may
+    # trigger a paid Whisper/GPT run, not anyone who can post an attachment here.
+    author = message.author
+    if not getattr(getattr(author, "guild_permissions", None), "manage_guild", False):
+        await message.channel.send(
+            "⚠️ Only staff can have a recording transcribed here.",
+            reference=message, allowed_mentions=discord.AllowedMentions.none())
+        return
 
     attachment = next(
         (a for a in message.attachments
          if meeting_service.is_audio_attachment(a.filename, getattr(a, "content_type", None))),
         None)
     if attachment is None:
+        return
+    # Pre-download size guard (attachment.size is Discord-reported bytes).
+    if getattr(attachment, "size", 0) > meeting_service._MAX_DOWNLOAD_BYTES:
+        await message.channel.send(
+            "⚠️ That file is far too large to process — trim it to a shorter clip.",
+            reference=message, allowed_mentions=discord.AllowedMentions.none())
         return
 
     async def _reply(text: str) -> None:
@@ -200,11 +218,24 @@ async def _process_meeting(client: discord.Client, message: discord.Message) -> 
         await _reply("⚠️ Something went wrong processing that recording — try again.")
         return
 
-    # Post the key-notes card.
     notes_embed = discord.Embed(
         title=f"Meeting notes — {_esc(attachment.filename[:80])}",
         description=_esc(notes.notes)[:4000] or "(no key points extracted)",
         color=0x1F8B4C)
+
+    # Two-phase: write the meeting row + all decision rows first (single session,
+    # closed before any Discord send), then post the notes card and decision cards.
+    # This avoids partial DB state if a send fails mid-loop.
+    decisions_to_post: list = []
+    with decision_service._session() as session:
+        add_meeting(session, message.guild.id, message.channel.id, attachment.filename,
+                    notes.notes[:1500], transcript.text[:500])
+        for summary in notes.decisions:
+            d = decision_service.create_pending_decision(
+                session, message.guild.id, message.channel.id, message.id,
+                message.author.id, summary, summary)
+            decisions_to_post.append(d)
+
     try:
         await message.channel.send(embed=notes_embed,
                                    allowed_mentions=discord.AllowedMentions.none(),
@@ -212,22 +243,14 @@ async def _process_meeting(client: discord.Client, message: discord.Message) -> 
     except discord.HTTPException:
         log.exception("could not post meeting notes for %s", attachment.filename)
 
-    # Store the meeting and raise a Confirm card per detected decision.
-    with decision_service._session() as session:
-        add_meeting(session, message.guild.id, message.channel.id, attachment.filename,
-                    notes.notes[:1500], transcript.text[:500])
-        for summary in notes.decisions:
-            decision = decision_service.create_pending_decision(
-                session, message.guild.id, message.channel.id, message.id,
-                message.author.id, summary, summary)
-            try:
-                await message.channel.send(
-                    embed=build_candidate_embed(decision.summary, message.author.id,
-                                                decision.content),
-                    view=DecisionView(decision.id),
-                    allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                log.exception("could not post meeting decision card")
+    for d in decisions_to_post:
+        try:
+            await message.channel.send(
+                embed=build_candidate_embed(d.summary, message.author.id, d.content),
+                view=DecisionView(d.id),
+                allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            log.exception("could not post meeting decision card")
 
 
 async def run_decision_bot() -> None:

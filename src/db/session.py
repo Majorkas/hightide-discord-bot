@@ -108,11 +108,9 @@ def ensure_decision_tables(engine) -> None:
 def ensure_meeting_tables(engine) -> None:
     """Create the meetings table + decision_config.meetings_channel_id on pre-existing DBs."""
     from src.db.models import Meeting
-    try:
-        with engine.begin() as conn:
-            Meeting.__table__.create(conn, checkfirst=True)
-    except OperationalError:
-        pass  # already exists
+    # checkfirst makes CREATE idempotent; a real failure (locked/full DB) should surface.
+    with engine.begin() as conn:
+        Meeting.__table__.create(conn, checkfirst=True)
     try:
         with engine.begin() as conn:
             conn.execute(text(

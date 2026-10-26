@@ -19,6 +19,25 @@ def test_meeting_table_created_and_idempotent(tmp_path):
     engine.dispose()
 
 
+def test_meetings_channel_alter_on_populated_config(tmp_path):
+    """Production path: decision_config already exists WITH rows but lacks the
+    meetings_channel_id column; ensure_meeting_tables must add it and keep the rows."""
+    engine = get_engine(f"sqlite:///{tmp_path / 'm.db'}")
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE decision_config (guild_id BIGINT PRIMARY KEY, enabled BOOLEAN, "
+            "trello_board_id VARCHAR(64), trello_list_id VARCHAR(64))"))
+        conn.execute(text(
+            "INSERT INTO decision_config (guild_id, enabled) VALUES (4242, 1)"))
+    ensure_meeting_tables(engine)
+    with engine.connect() as conn:
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info(decision_config)"))}
+        assert "meetings_channel_id" in cols
+        row = conn.execute(text("SELECT guild_id, enabled FROM decision_config")).one()
+        assert row == (4242, 1)  # existing row survived with NULL meetings_channel_id
+    engine.dispose()
+
+
 def test_add_and_list_meetings(session):
     add_meeting(session, GUILD, 1, "meet1.m4a", "Key points A", "excerpt A")
     add_meeting(session, GUILD, 1, "meet2.m4a", "Key points B", "excerpt B")

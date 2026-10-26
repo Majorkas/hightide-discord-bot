@@ -32,7 +32,12 @@ A separate Discord bot (same process) can watch staff channels for decisions and
 - **`/decision map <@user> <trello_member_id>` / `unmap <@user>`** — Discord→Trello member assignment.
 - **`/decision list [status]`**, **`/decision create <summary>`**, **`/decision sync`** (retry unsynced).
 
+### Meeting notes (transcription)
 
+Drop an audio recording (`.mp3`/`.m4a`/`.wav`/`.ogg`/`.mp4`/…) into the meetings channel and the decision bot transcribes it with Whisper, extracts key notes + decisions with GPT, posts a notes card, and raises a Confirm card per decision. Uses the same `OPENAI_API_KEY`; recordings over 25MB are split into chunks with ffmpeg (installed in the Docker image). Only **staff** (Manage Guild) can trigger a transcription, and recordings are capped at 90 minutes / 150MB.
+
+- **`/decision meetings_channel <#channel>`** — set where recordings are transcribed.
+- **`/decision meetings`** — list past meetings (filename, date, summary).
 
 https://discord.com/oauth2/authorize?client_id=1563879286677446676&scope=bot&permissions=277025392640
 ## Setup

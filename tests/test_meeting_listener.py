@@ -33,20 +33,24 @@ def _enabled(db, meetings_channel=MEET_CH, enabled=True):
         s.commit()
 
 
-def _attachment(filename="meeting.m4a", ctype="audio/mp4", url="https://cdn/x.m4a"):
+def _attachment(filename="meeting.m4a", ctype="audio/mp4", url="https://cdn/x.m4a",
+                size=1000):
     a = MagicMock()
     a.filename = filename
     a.content_type = ctype
     a.url = url
+    a.size = size
     return a
 
 
-def _message(attachments, channel_id=MEET_CH, in_guild=True, author_bot=False):
+def _message(attachments, channel_id=MEET_CH, in_guild=True, author_bot=False,
+             manage_guild=True):
     m = MagicMock(spec=discord.Message)
     m.content = ""
     m.id = 5000
     m.attachments = attachments
     m.author = MagicMock(bot=author_bot, id=7, display_name="Sam")
+    m.author.guild_permissions = MagicMock(manage_guild=manage_guild)
     m.guild = MagicMock(id=GUILD) if in_guild else None
     m.channel = MagicMock(id=channel_id)
     m.channel.send = AsyncMock()
@@ -97,20 +101,42 @@ async def test_process_meeting_posts_notes_and_decision_card(db, monkeypatch):
         assert s.execute(select(Decision)).scalar_one().summary == "Run Friday drafts at 7pm"
 
 
-async def test_process_meeting_wrong_channel_ignored(db, monkeypatch):
+async def test_process_meeting_non_staff_rejected(db, monkeypatch):
+    _enabled(db)
+    _pipeline(monkeypatch)
+    m = _message([_attachment()], manage_guild=False)
+    await decision_bot._process_meeting(MagicMock(), m)
+    # staff-gate reply only; no transcription, no meeting stored
+    m.channel.send.assert_awaited_once()
+    assert "Only staff" in m.channel.send.call_args.args[0]
+    meeting_service.download_attachment.assert_not_awaited()
+    with db() as s:
+        assert s.execute(select(Meeting)).scalars().all() == []
+
+
+# --- on_message routing (audio in meetings channel vs elsewhere) ---
+
+async def test_on_message_routes_meetings_channel(db, monkeypatch):
+    _enabled(db)
+    _pipeline(monkeypatch)
+    m = _message([_attachment()], channel_id=MEET_CH)
+    bot = decision_bot.create_decision_bot()
+    with patch.object(decision_bot, "_process_meeting", new=AsyncMock()) as proc:
+        await bot.on_message(m)
+    proc.assert_awaited_once()
+
+
+async def test_on_message_audio_elsewhere_falls_to_detection(db, monkeypatch):
+    # Audio attachment in a monitored NON-meetings channel must NOT be swallowed by
+    # the meeting pipeline; it falls through to decision detection.
     _enabled(db, meetings_channel=MEET_CH)
-    _pipeline(monkeypatch)
-    m = _message([_attachment()], channel_id=999)
-    await decision_bot._process_meeting(MagicMock(), m)
-    m.channel.send.assert_not_awaited()
-
-
-async def test_process_meeting_disabled_ignored(db, monkeypatch):
-    _enabled(db, enabled=False)
-    _pipeline(monkeypatch)
-    m = _message([_attachment()])
-    await decision_bot._process_meeting(MagicMock(), m)
-    m.channel.send.assert_not_awaited()
+    m = _message([_attachment()], channel_id=999)  # not the meetings channel
+    bot = decision_bot.create_decision_bot()
+    with patch.object(decision_bot, "_process_meeting", new=AsyncMock()) as proc, \
+         patch.object(decision_bot, "_maybe_detect", new=AsyncMock()) as det:
+        await bot.on_message(m)
+    proc.assert_not_awaited()
+    det.assert_awaited_once()
 
 
 async def test_process_meeting_notes_only_when_no_decisions(db, monkeypatch):
